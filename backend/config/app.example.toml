@@ -1,0 +1,24 @@
+# 复制为 app.toml 后按需修改（app.toml 已加入 .gitignore 时可本地覆盖）
+debug = true
+secret_key = "change-me-in-production"
+database_url = "sqlite+aiosqlite:///../data/sqlite/app.db"
+host = "0.0.0.0"
+port = 8000
+cors_origins = ["http://localhost:5173"]
+app_name = "ai-assistant"
+app_version = "1.0.0"
+jwt_algorithm = "HS256"
+jwt_expire_minutes = 10080
+
+# LLM（阿里云百炼 DashScope，OpenAI 兼容接口）
+# API Key：https://dashscope.console.aliyun.com/
+llm_api_key = ""
+llm_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+llm_model = "qwen-max"
+llm_temperature = 0.7
+llm_timeout_seconds = 60
+llm_max_tokens = 4096
+
+# Embedding（本地 sentence-transformers，B06/B07 使用）
+embedding_model = "BAAI/bge-small-zh-v1.5"
+embedding_device = "cpu"

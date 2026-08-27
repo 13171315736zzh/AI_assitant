@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>01-登录页 · 智能办公助手</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Outfit:wght@600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --primary: #C11920;
+      --primary-hover: #A01418;
+      --accent: #F6AB00;
+      --accent-light: #FFCF33;
+      --secondary: #D84C14;
+      --bg: #F1F4F6;
+      --surface: #FFFFFF;
+      --text: #333333;
+      --text-secondary: #666666;
+      --text-muted: #999999;
+      --border: #D5D7DB;
+      --radius-sm: 8px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background: #e8e8ea;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .viewport-label {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      font-size: 12px;
+      color: var(--text-muted);
+      background: var(--surface);
+      padding: 4px 10px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+    }
+
+    .screen {
+      width: 1440px;
+      height: 900px;
+      max-width: 100%;
+      aspect-ratio: 1440 / 900;
+      display: flex;
+      overflow: hidden;
+      border-radius: var(--radius-sm);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+      background: var(--surface);
+    }
+
+    /* 左侧品牌区 */
+    .brand-panel {
+      width: 45%;
+      min-width: 320px;
+      background: linear-gradient(180deg, #F6AB00 0%, #D84C14 100%);
+      padding: 64px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      color: #fff;
+    }
+
+    .brand-content { display: flex; flex-direction: column; gap: 16px; }
+
+    .brand-logo {
+      font-family: 'Outfit', sans-serif;
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-title {
+      font-family: 'Outfit', sans-serif;
+      font-size: 36px;
+      font-weight: 700;
+      letter-spacing: -0.04em;
+      line-height: 1.2;
+    }
+
+    .brand-slogan {
+      font-size: 16px;
+      opacity: 0.9;
+      line-height: 1.5;
+    }
+
+    .brand-accent-line {
+      height: 2px;
+      width: 100%;
+      background: linear-gradient(to right, #FFCF33 50%, #C11920);
+      border-radius: 1px;
+    }
+
+    /* 右侧表单区 */
+    .form-panel {
+      flex: 1;
+      background: var(--bg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 48px;
+    }
+
+    .login-card {
+      width: 400px;
+      max-width: 100%;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 32px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .login-card h1 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 22px;
+      font-weight: 600;
+      letter-spacing: -0.04em;
+      color: var(--text);
+    }
+
+    .field { display: flex; flex-direction: column; gap: 8px; }
+
+    .field label {
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    .field input {
+      height: 40px;
+      padding: 0 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-size: 14px;
+      font-family: inherit;
+      color: var(--text);
+      background: var(--surface);
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+
+    .field input:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 2px rgba(193, 25, 32, 0.15);
+    }
+
+    .field input::placeholder { color: var(--text-muted); }
+
+    .btn-login {
+      height: 44px;
+      border: none;
+      border-radius: var(--radius-sm);
+      background: var(--primary);
+      color: #fff;
+      font-size: 15px;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .btn-login:hover { background: var(--primary-hover); }
+
+    .hint {
+      font-size: 12px;
+      color: var(--text-muted);
+      text-align: center;
+      line-height: 1.5;
+    }
+
+    @media (max-width: 900px) {
+      .screen { flex-direction: column; height: auto; min-height: 700px; }
+      .brand-panel { width: 100%; min-height: 240px; padding: 40px; }
+      .form-panel { padding: 32px 24px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="viewport-label">1440 × 900 · 01-登录页原型</div>
+
+  <div class="screen" role="main">
+    <aside class="brand-panel">
+      <div class="brand-content">
+        <div class="brand-logo">国家能源集团</div>
+        <h2 class="brand-title">智能办公助手</h2>
+        <p class="brand-slogan">对话即办公，Agent 帮你搞定</p>
+      </div>
+      <div class="brand-accent-line" aria-hidden="true"></div>
+    </aside>
+
+    <section class="form-panel">
+      <form class="login-card" onsubmit="return false;">
+        <h1>账号登录</h1>
+
+        <div class="field">
+          <label for="username">账号</label>
+          <input id="username" type="text" value="user_a" placeholder="请输入账号" autocomplete="username" />
+        </div>
+
+        <div class="field">
+          <label for="password">密码</label>
+          <input id="password" type="password" value="password" placeholder="请输入密码" autocomplete="current-password" />
+        </div>
+
+        <button type="submit" class="btn-login">登录</button>
+
+        <p class="hint">预设账号：admin / user_a / user_b</p>
+      </form>
+    </section>
+  </div>
+</body>
+</html>
