@@ -1,30 +1,64 @@
 <script setup lang="ts">
-function checkUpdate() {
-  alert('已是最新版本')
+import { onMounted, ref } from 'vue'
+import type { VersionInfo } from '@/services/settingsService'
+import { checkVersion, fetchVersion } from '@/services/settingsService'
+
+const loading = ref(true)
+const checking = ref(false)
+const versionInfo = ref<VersionInfo | null>(null)
+
+async function load() {
+  loading.value = true
+  try {
+    const res = await fetchVersion()
+    if (res.code === 200) {
+      versionInfo.value = res.data
+    }
+  } finally {
+    loading.value = false
+  }
 }
+
+async function checkUpdate() {
+  checking.value = true
+  try {
+    const res = await checkVersion()
+    if (res.code === 200) {
+      alert(res.data.message)
+    }
+  } finally {
+    checking.value = false
+  }
+}
+
+onMounted(load)
 </script>
 
 <template>
   <div class="settings-page">
     <h1>版本升级</h1>
-    <div class="card tonal">
-      <div class="version-title">当前版本</div>
-      <div class="version-no">v1.0.0</div>
-      <div class="version-date">发布日期：2026-03-20</div>
-      <button type="button" class="btn-primary" @click="checkUpdate">检查更新</button>
-    </div>
 
-    <div class="card">
-      <h3>更新日志</h3>
-      <div class="log-item">
-        <strong>v1.0.0 · 2026-03-20</strong>
-        <ul>
-          <li>首次发布：对话、知识库、差旅/工包/会议/邮件工具</li>
-          <li>支持个人设置与长期记忆</li>
-          <li>人工协助工单</li>
-        </ul>
+    <div v-if="loading" class="loading">加载中…</div>
+    <template v-else-if="versionInfo">
+      <div class="card tonal">
+        <div class="version-title">当前版本</div>
+        <div class="version-no">v{{ versionInfo.version }}</div>
+        <div class="version-date">发布日期：{{ versionInfo.release_date }}</div>
+        <button type="button" class="btn-primary" :disabled="checking" @click="checkUpdate">
+          {{ checking ? '检查中…' : '检查更新' }}
+        </button>
       </div>
-    </div>
+
+      <div class="card">
+        <h3>更新日志</h3>
+        <div v-for="entry in versionInfo.changelog" :key="entry.version" class="log-item">
+          <strong>{{ entry.version }} · {{ entry.date }}</strong>
+          <ul>
+            <li v-for="(item, idx) in entry.items" :key="idx">{{ item }}</li>
+          </ul>
+        </div>
+      </div>
+    </template>
   </div>
 </template>
 
@@ -32,6 +66,11 @@ function checkUpdate() {
 .settings-page h1 {
   font-size: 22px;
   margin-bottom: 24px;
+}
+
+.loading {
+  color: var(--text-muted);
+  font-size: 14px;
 }
 
 .card {
@@ -44,8 +83,8 @@ function checkUpdate() {
 }
 
 .card.tonal {
-  background: #fdf2f2;
-  border-color: #f5c6c6;
+  background: var(--user-bubble-bg);
+  border-color: var(--user-bubble-border);
 }
 
 .version-title {

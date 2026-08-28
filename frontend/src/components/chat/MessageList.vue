@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onMounted, ref, watch } from 'vue'
-import type { Message } from '@/types'
+import type { Message, MessageSource } from '@/types'
 
 const props = defineProps<{
   messages: Message[]
@@ -8,6 +8,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   openTask: [taskId: string]
+  openSource: [source: MessageSource]
 }>()
 
 const containerRef = ref<HTMLElement | null>(null)
@@ -49,8 +50,8 @@ function taskMeta(msg: Message) {
   }
 }
 
-function sources(msg: Message) {
-  const list = msg.metadata?.sources as Array<{ filename: string; clause: string }> | undefined
+function sources(msg: Message): MessageSource[] {
+  const list = msg.metadata?.sources as MessageSource[] | undefined
   return list ?? []
 }
 </script>
@@ -86,9 +87,15 @@ function sources(msg: Message) {
 
         <div v-if="sources(msg).length" class="source-block">
           <div class="source-label">引用来源</div>
-          <div v-for="(src, i) in sources(msg)" :key="i" class="source-item">
+          <button
+            v-for="(src, i) in sources(msg)"
+            :key="i"
+            type="button"
+            class="source-item"
+            @click="emit('openSource', src)"
+          >
             《{{ src.filename }}》{{ src.clause }}
-          </div>
+          </button>
         </div>
       </div>
     </div>
@@ -210,8 +217,21 @@ function sources(msg: Message) {
 }
 
 .source-item {
+  display: block;
+  width: 100%;
+  text-align: left;
   font-size: 12px;
   color: var(--primary);
+  background: none;
+  border: none;
+  padding: 4px 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.source-item:hover {
+  color: var(--accent);
 }
 
 .scroll-anchor {

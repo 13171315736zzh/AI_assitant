@@ -3,7 +3,7 @@ import { mockCancelTask, mockConfirmTask, mockGetTask } from '@/mocks/tasks'
 import api, { isMockMode } from './api'
 
 export async function fetchTask(taskId: string): Promise<ApiResponse<Task>> {
-  if (isMockMode()) {
+  if (isMockMode('tasks')) {
     await delay(200)
     const task = mockGetTask(taskId)
     if (!task) return { code: 404, message: '任务不存在', data: null as unknown as Task }
@@ -14,7 +14,7 @@ export async function fetchTask(taskId: string): Promise<ApiResponse<Task>> {
 }
 
 export async function cancelTask(taskId: string): Promise<ApiResponse<{ id: string; status: string }>> {
-  if (isMockMode()) {
+  if (isMockMode('tasks')) {
     const task = mockCancelTask(taskId)
     if (!task) return { code: 404, message: '任务不存在', data: null as unknown as { id: string; status: string } }
     return { code: 200, message: 'success', data: { id: task.id, status: task.status } }
@@ -27,7 +27,7 @@ export async function confirmTask(
   taskId: string,
   stepId: number,
 ): Promise<ApiResponse<{ id: string; status: string; current_step: number }>> {
-  if (isMockMode()) {
+  if (isMockMode('tasks')) {
     const task = mockConfirmTask(taskId, stepId)
     if (!task) return { code: 404, message: '任务不存在', data: null as unknown as { id: string; status: string; current_step: number } }
     return {

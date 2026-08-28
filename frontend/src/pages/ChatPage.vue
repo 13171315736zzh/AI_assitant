@@ -7,12 +7,15 @@ import MessageList from '@/components/chat/MessageList.vue'
 import ChatInput from '@/components/chat/ChatInput.vue'
 import TicketModal from '@/components/chat/TicketModal.vue'
 import TaskDetailPanel from '@/components/chat/TaskDetailPanel.vue'
+import DocumentPreviewModal from '@/components/chat/DocumentPreviewModal.vue'
 import BusinessFormPanel from '@/components/chat/BusinessFormPanel.vue'
+import type { MessageSource } from '@/types'
 
 const chat = useChatStore()
 const showTicket = ref(false)
 const activeTaskId = ref<string | null>(null)
 const activeFormId = ref<string | null>(null)
+const previewSource = ref<MessageSource | null>(null)
 
 onMounted(() => {
   chat.loadSessions()
@@ -49,6 +52,10 @@ function closePanels() {
   activeTaskId.value = null
   activeFormId.value = null
 }
+
+function openSource(source: MessageSource) {
+  previewSource.value = source
+}
 </script>
 
 <template>
@@ -71,6 +78,7 @@ function closePanels() {
       <MessageList
         :messages="chat.messages"
         @open-task="openTask"
+        @open-source="openSource"
       />
 
       <ChatInput
@@ -93,7 +101,16 @@ function closePanels() {
       @close="closePanels"
     />
 
-    <TicketModal v-if="showTicket" @close="showTicket = false" />
+    <TicketModal
+      v-if="showTicket"
+      :session-id="chat.activeSession?.id ?? null"
+      @close="showTicket = false"
+    />
+
+    <DocumentPreviewModal
+      :source="previewSource"
+      @close="previewSource = null"
+    />
   </div>
 </template>
 

@@ -27,3 +27,11 @@ async def get_current_user(
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="未认证或 Token 已过期")
     return user
+
+
+async def get_current_admin(
+    current_user: UserPublic = Depends(get_current_user),
+) -> UserPublic:
+    if current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
+    return current_user

@@ -4,7 +4,7 @@ export interface AdminDocument {
   id: string
   filename: string
   file_type: string
-  status: 'ready' | 'uploading' | 'parsing' | 'indexing' | 'failed'
+  status: 'ready' | 'uploading' | 'parsing' | 'indexing' | 'qa_generating' | 'failed'
   uploaded_by: string
   created_at: string
   progress_percent?: number

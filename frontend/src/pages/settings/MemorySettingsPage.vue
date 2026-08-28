@@ -1,26 +1,54 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import type { MemoryItem } from '@/services/settingsService'
+import { fetchMemory, updateMemory } from '@/services/settingsService'
 
 const memoryEnabled = ref(true)
+const memoryItems = ref<MemoryItem[]>([])
+const loading = ref(true)
+const saving = ref(false)
 
-const memoryItems = ref([
-  { key: '常用出差目的地', value: '鄂尔多斯、北京' },
-  { key: '常用联系人', value: '李经理（工包审批）' },
-  { key: '默认部门', value: '神东煤炭集团' },
-  { key: '沟通偏好', value: '简洁回复，优先表格展示' },
-  { key: '差旅偏好', value: '优先下午航班，经济舱' },
-])
-
-function save() {
-  alert('记忆设置已保存')
+async function load() {
+  loading.value = true
+  try {
+    const res = await fetchMemory()
+    if (res.code === 200) {
+      memoryEnabled.value = res.data.memory_enabled
+      memoryItems.value = res.data.memory_items.map((item) => ({ ...item }))
+    }
+  } finally {
+    loading.value = false
+  }
 }
+
+async function save() {
+  saving.value = true
+  try {
+    const res = await updateMemory({
+      memory_enabled: memoryEnabled.value,
+      memory_items: memoryItems.value,
+    })
+    if (res.code === 200) {
+      memoryEnabled.value = res.data.memory_enabled
+      memoryItems.value = res.data.memory_items.map((item) => ({ ...item }))
+      alert('记忆设置已保存')
+    } else {
+      alert(res.message || '保存失败')
+    }
+  } finally {
+    saving.value = false
+  }
+}
+
+onMounted(load)
 </script>
 
 <template>
   <div class="settings-page">
     <h1>记忆设置</h1>
 
-    <div class="card full">
+    <div v-if="loading" class="loading">加载中…</div>
+    <div v-else class="card full">
       <div class="toggle-row">
         <span>启用长期记忆</span>
         <label class="switch">
@@ -45,7 +73,9 @@ function save() {
 
       <div class="footer">
         <div class="warn">可在对话页顶栏「清除记忆」一键清空所有长期记忆</div>
-        <button type="button" class="btn-primary" @click="save">保存修改</button>
+        <button type="button" class="btn-primary" :disabled="saving" @click="save">
+          {{ saving ? '保存中…' : '保存修改' }}
+        </button>
       </div>
     </div>
   </div>
@@ -55,6 +85,11 @@ function save() {
 .settings-page h1 {
   font-size: 22px;
   margin-bottom: 24px;
+}
+
+.loading {
+  color: var(--text-muted);
+  font-size: 14px;
 }
 
 .card.full {
@@ -159,6 +194,7 @@ function save() {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg);
+  color: var(--text);
   font-size: 13px;
 }
 

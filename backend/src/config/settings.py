@@ -21,6 +21,7 @@ class AppSettings(BaseSettings):
     llm_api_key: str = ""
     llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     llm_model: str = "qwen-max"
+    llm_vision_model: str = "qwen-vl-plus"
     llm_temperature: float = 0.7
     llm_timeout_seconds: int = 60
     llm_max_tokens: int = 4096

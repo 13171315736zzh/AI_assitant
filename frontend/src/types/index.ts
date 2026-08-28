@@ -59,6 +59,12 @@ export interface SendMessageData {
   assistant_message: Message
 }
 
+export interface MessageSource {
+  filename: string
+  clause: string
+  document_id?: string
+}
+
 export interface TaskStep {
   step_id: number
   action: string

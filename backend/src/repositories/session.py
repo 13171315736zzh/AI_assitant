@@ -48,6 +48,66 @@ class SessionRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_id_admin(self, session_id: str) -> SessionRecord | None:
+        result = await self.db.execute(
+            select(SessionRecord).where(SessionRecord.id == session_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def list_all_admin(
+        self,
+        keyword: str | None,
+        status: str | None,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[tuple[SessionRecord, object]], int]:
+        from src.db.user_model import User
+
+        query = select(SessionRecord, User).join(User, SessionRecord.user_id == User.id)
+        if keyword:
+            pattern = f"%{keyword}%"
+            query = query.where(
+                (SessionRecord.title.like(pattern)) | (User.display_name.like(pattern))
+            )
+        if status:
+            query = query.where(SessionRecord.status == status)
+
+        count_stmt = select(func.count()).select_from(query.subquery())
+        total = int((await self.db.execute(count_stmt)).scalar_one())
+        result = await self.db.execute(
+            query.order_by(SessionRecord.updated_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        return list(result.all()), total
+
+    async def get_stats(self) -> tuple[int, int, int]:
+        from datetime import UTC, datetime
+
+        total = int(
+            (await self.db.execute(select(func.count()).select_from(SessionRecord))).scalar_one()
+        )
+        active = int(
+            (
+                await self.db.execute(
+                    select(func.count())
+                    .select_from(SessionRecord)
+                    .where(SessionRecord.status == "active")
+                )
+            ).scalar_one()
+        )
+        today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_new = int(
+            (
+                await self.db.execute(
+                    select(func.count())
+                    .select_from(SessionRecord)
+                    .where(SessionRecord.created_at >= today_start)
+                )
+            ).scalar_one()
+        )
+        return total, active, today_new
+
     async def create(self, user_id: int, title: str) -> SessionRecord:
         now = datetime.now(UTC)
         record = SessionRecord(

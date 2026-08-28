@@ -32,9 +32,13 @@ export const useChatStore = defineStore('chat', () => {
       const res = await fetchSessions(auth.user.id)
       if (res.code === 200) {
         sessions.value = res.data.items
-        if (!activeSessionId.value && sessions.value.length > 0) {
-          activeSessionId.value = sessions.value[0].id
-          await loadMessages(activeSessionId.value)
+        const ids = new Set(sessions.value.map((s) => s.id))
+        if (!activeSessionId.value || !ids.has(activeSessionId.value)) {
+          activeSessionId.value = sessions.value[0]?.id ?? null
+          messages.value = []
+          if (activeSessionId.value) {
+            await loadMessages(activeSessionId.value)
+          }
         }
       }
     } finally {

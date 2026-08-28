@@ -7,6 +7,7 @@ from pycore.integrations.llm.base import Message
 from src.agent.prompts import ACK_SYSTEM, REJECT_MESSAGE
 from src.integrations.llm_factory import (
     build_llm_messages,
+    build_policy_metadata,
     create_llm_provider,
     detect_message_type,
     history_from_records,
@@ -66,7 +67,9 @@ class ChatAgentPlugin(BasePlugin):
             if not content:
                 content = REJECT_MESSAGE
             message_type = detect_message_type(content)
-            metadata = {"sources": []} if message_type == "text" else None
+            metadata = build_policy_metadata(user_content, content)
+            if metadata is None and message_type == "text":
+                metadata = {"sources": []}
             return self.success(
                 {
                     "content": content,

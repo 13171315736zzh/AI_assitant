@@ -29,7 +29,7 @@ api.interceptors.response.use(
 
 export default api
 
-type MockScope = 'auth' | 'sessions' | 'tasks' | 'forms' | 'knowledge' | 'admin'
+type MockScope = 'auth' | 'sessions' | 'tasks' | 'forms' | 'knowledge' | 'admin' | 'settings'
 
 /** 全局 Mock 关闭时全部走真实 API；否则可按模块单独关闭 Mock */
 export const isMockMode = (scope?: MockScope): boolean => {

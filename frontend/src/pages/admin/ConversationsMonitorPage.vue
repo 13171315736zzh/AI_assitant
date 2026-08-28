@@ -1,7 +1,12 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import type { AdminConversation, ConversationStats } from '@/services/adminService'
-import { fetchAdminConversations, fetchConversationStats } from '@/services/adminService'
+import {
+  fetchAdminConversations,
+  fetchConversationStats,
+  buildConversationsCsvBlob,
+  downloadCsvBlob,
+} from '@/services/adminService'
 import ConversationDetailModal from './ConversationDetailModal.vue'
 
 const stats = ref<ConversationStats | null>(null)
@@ -9,7 +14,19 @@ const conversations = ref<AdminConversation[]>([])
 const keyword = ref('')
 const statusFilter = ref('')
 const loading = ref(false)
+const exporting = ref(false)
 const detailSessionId = ref<string | null>(null)
+const selectedIds = ref<Set<string>>(new Set())
+
+const allSelected = computed(
+  () =>
+    conversations.value.length > 0 &&
+    conversations.value.every((c) => selectedIds.value.has(c.id)),
+)
+
+const someSelected = computed(
+  () => selectedIds.value.size > 0 && !allSelected.value,
+)
 
 async function load() {
   loading.value = true
@@ -19,7 +36,11 @@ async function load() {
       fetchAdminConversations(keyword.value || undefined, statusFilter.value || undefined),
     ])
     if (statsRes.code === 200) stats.value = statsRes.data
-    if (listRes.code === 200) conversations.value = listRes.data.items
+    if (listRes.code === 200) {
+      conversations.value = listRes.data.items
+      const visible = new Set(conversations.value.map((c) => c.id))
+      selectedIds.value = new Set([...selectedIds.value].filter((id) => visible.has(id)))
+    }
   } finally {
     loading.value = false
   }
@@ -31,8 +52,40 @@ function formatTime(iso: string) {
   return iso.replace('T', ' ').slice(0, 16)
 }
 
-function exportRecords() {
-  alert('导出记录成功，文件已生成')
+function toggleAll(checked: boolean) {
+  if (checked) {
+    selectedIds.value = new Set(conversations.value.map((c) => c.id))
+  } else {
+    selectedIds.value = new Set()
+  }
+}
+
+function toggleOne(id: string, checked: boolean) {
+  const next = new Set(selectedIds.value)
+  if (checked) next.add(id)
+  else next.delete(id)
+  selectedIds.value = next
+}
+
+async function exportSelected() {
+  if (selectedIds.value.size === 0) {
+    alert('请先勾选要导出的会话')
+    return
+  }
+  const rows = conversations.value.filter((c) => selectedIds.value.has(c.id))
+  if (!rows.length) {
+    alert('未找到可导出的会话，请刷新后重试')
+    return
+  }
+  exporting.value = true
+  try {
+    const blob = buildConversationsCsvBlob(rows)
+    downloadCsvBlob(blob)
+  } catch {
+    alert('导出失败，请稍后重试')
+  } finally {
+    exporting.value = false
+  }
 }
 
 function openDetail(sessionId: string) {
@@ -76,11 +129,27 @@ function closeDetail() {
         <option value="ended">已结束</option>
       </select>
       <button type="button" class="btn-secondary" @click="load">搜索</button>
-      <button type="button" class="btn-primary" @click="exportRecords">导出记录</button>
+      <button
+        type="button"
+        class="btn-primary"
+        :disabled="exporting || selectedIds.size === 0"
+        @click="exportSelected"
+      >
+        {{ exporting ? '导出中…' : '导出' }}
+      </button>
     </div>
 
     <div class="table">
       <div class="table-head">
+        <span class="col-check">
+          <input
+            type="checkbox"
+            :checked="allSelected"
+            :indeterminate="someSelected"
+            aria-label="全选"
+            @change="toggleAll(($event.target as HTMLInputElement).checked)"
+          />
+        </span>
         <span>用户</span>
         <span>会话标题</span>
         <span>状态</span>
@@ -92,6 +161,14 @@ function closeDetail() {
       <div v-if="loading" class="empty">加载中…</div>
       <template v-else>
         <div v-for="c in conversations" :key="c.id" class="table-row">
+          <span class="col-check">
+            <input
+              type="checkbox"
+              :checked="selectedIds.has(c.id)"
+              :aria-label="`选择 ${c.title}`"
+              @change="toggleOne(c.id, ($event.target as HTMLInputElement).checked)"
+            />
+          </span>
           <span>{{ c.user.display_name }} ({{ c.user.employee_id }})</span>
           <span>{{ c.title }}</span>
           <span>
@@ -208,7 +285,7 @@ function closeDetail() {
 .table-head,
 .table-row {
   display: grid;
-  grid-template-columns: 180px 1.5fr 80px 70px 140px 140px 90px;
+  grid-template-columns: 44px 180px 1.5fr 80px 70px 140px 140px 90px;
   padding: 12px 16px;
   align-items: center;
   gap: 8px;
@@ -229,6 +306,19 @@ function closeDetail() {
 
 .table-row:hover {
   background: #fafbfc;
+}
+
+.col-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.col-check input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--primary);
 }
 
 .status-tag {

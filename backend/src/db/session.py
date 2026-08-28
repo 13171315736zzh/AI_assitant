@@ -2,12 +2,19 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.config.settings import get_settings
 from src.db.models import Base
 from src.db.chat_models import MessageRecord, SessionRecord  # noqa: F401
+from src.db.form_models import FormRecord  # noqa: F401
+from src.db.knowledge_models import DocumentChunkRecord, DocumentRecord, QARecord  # noqa: F401
+from src.db.task_models import TaskRecord  # noqa: F401
 from src.db.user_model import User  # noqa: F401
+from src.db.user_settings_models import UserSettingsRecord  # noqa: F401
+from src.db.system_config_models import SystemConfigRecord  # noqa: F401
+from src.db.ticket_models import TicketRecord  # noqa: F401
 
 _engine = None
 _async_session_factory: async_sessionmaker[AsyncSession] | None = None
@@ -38,6 +45,12 @@ async def init_db() -> None:
     engine = _get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # SQLite 无自动迁移：tasks 表结构变更时重建
+        result = await conn.execute(text("PRAGMA table_info(tasks)"))
+        cols = [row[1] for row in result.fetchall()]
+        if cols and "user_id" not in cols:
+            await conn.execute(text("DROP TABLE tasks"))
+            await conn.run_sync(Base.metadata.create_all)
 
 
 async def close_db() -> None:

@@ -1,20 +1,58 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import type { ThemeValue } from '@/services/settingsService'
+import { fetchTheme, updateTheme } from '@/services/settingsService'
+import { applyTheme, themeLabels } from '@/utils/theme'
 
-const theme = ref<'light' | 'dark' | 'system'>('light')
+const theme = ref<ThemeValue>('light')
+const loading = ref(true)
+const saving = ref(false)
+
 const options = [
   { value: 'light' as const, label: '浅色' },
   { value: 'dark' as const, label: '深色' },
   { value: 'system' as const, label: '跟随系统' },
 ]
+
+const currentLabel = computed(() => themeLabels[theme.value])
+
+async function load() {
+  loading.value = true
+  try {
+    const res = await fetchTheme()
+    if (res.code === 200) {
+      theme.value = res.data.theme
+      applyTheme(res.data.theme)
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+watch(theme, async (value, oldValue) => {
+  if (loading.value || value === oldValue) return
+  applyTheme(value)
+  saving.value = true
+  try {
+    await updateTheme(value)
+  } finally {
+    saving.value = false
+  }
+})
+
+onMounted(load)
 </script>
 
 <template>
   <div class="settings-page">
     <h1>外观主题</h1>
-    <p class="desc">选择界面配色方案，更改后立即生效。当前：浅色</p>
+    <p class="desc">
+      选择界面配色方案，更改后立即生效。当前：{{ currentLabel }}
+      <span v-if="saving" class="saving">（保存中…）</span>
+    </p>
 
-    <div class="card">
+    <div v-if="loading" class="loading">加载中…</div>
+    <div v-else class="card">
       <label v-for="opt in options" :key="opt.value" class="radio-row">
         <input v-model="theme" type="radio" :value="opt.value" />
         <span>{{ opt.label }}</span>
@@ -48,6 +86,16 @@ const options = [
 .desc {
   font-size: 13px;
   color: var(--text-muted);
+  margin-bottom: 24px;
+}
+
+.saving {
+  margin-left: 4px;
+}
+
+.loading {
+  color: var(--text-muted);
+  font-size: 14px;
   margin-bottom: 24px;
 }
 

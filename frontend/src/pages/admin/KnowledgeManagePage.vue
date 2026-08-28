@@ -1,10 +1,16 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import DocumentPreviewModal from '@/components/chat/DocumentPreviewModal.vue'
+import type { MessageSource } from '@/types'
 import type { AdminDocument, AdminQA } from '@/services/adminService'
 import {
+  deleteAdminDocument,
   fetchAdminDocuments,
   fetchAdminQA,
+  fetchDocumentProgress,
+  reindexAdminDocument,
   searchTest,
+  uploadAdminDocument,
 } from '@/services/adminService'
 
 const activeTab = ref<'docs' | 'qa' | 'search'>('docs')
@@ -14,6 +20,97 @@ const qaKeyword = ref('')
 const searchQuery = ref('')
 const searchResults = ref<Array<{ question: string; answer: string; similarity: number; source_clause: string }>>([])
 const loading = ref(false)
+const previewSource = ref<MessageSource | null>(null)
+
+const fileInput = ref<HTMLInputElement | null>(null)
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function pollDocument(docId: string) {
+  for (let i = 0; i < 90; i++) {
+    await delay(2000)
+    const res = await fetchDocumentProgress(docId)
+    if (res.code !== 200) continue
+    const { status } = res.data
+    await loadDocs()
+    if (status === 'ready') {
+      await loadQA()
+      alert('文档已入库，QA 已自动生成')
+      return
+    }
+    if (status === 'failed') {
+      alert('文档处理失败，请重试或重新上传')
+      return
+    }
+  }
+}
+
+function pickFile() {
+  fileInput.value?.click()
+}
+
+async function handleFileChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  loading.value = true
+  try {
+    const res = await uploadAdminDocument(file)
+    if (res.code === 200) {
+      await loadDocs()
+      void pollDocument(res.data.id)
+    } else {
+      alert(res.message || '上传失败')
+    }
+  } finally {
+    loading.value = false
+    input.value = ''
+  }
+}
+
+async function removeDoc(docId: string) {
+  if (!confirm('确定删除该文档及关联 QA？')) return
+  loading.value = true
+  try {
+    const res = await deleteAdminDocument(docId)
+    if (res.code === 200) {
+      await loadDocs()
+    } else {
+      alert(res.message || '删除失败')
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+async function regenerateDoc(doc: AdminDocument) {
+  loading.value = true
+  try {
+    const res = await reindexAdminDocument(doc.id)
+    if (res.code === 200) {
+      await loadDocs()
+      void pollDocument(doc.id)
+    } else {
+      alert(res.message || '重新解析失败')
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+function previewDoc(doc: AdminDocument) {
+  if (doc.file_type !== 'pdf') {
+    alert('当前仅支持在线预览 PDF')
+    return
+  }
+  previewSource.value = {
+    document_id: doc.id,
+    filename: doc.filename,
+    clause: '',
+  }
+}
 
 async function loadDocs() {
   loading.value = true
@@ -54,15 +151,18 @@ function switchTab(tab: typeof activeTab.value) {
 
 onMounted(loadDocs)
 
-function statusLabel(status: AdminDocument['status']) {
-  const map = {
+function statusLabel(status: AdminDocument['status'] | string) {
+  const map: Record<string, string> = {
     ready: '已入库',
     uploading: '上传中',
     parsing: '解析中',
     indexing: '索引中',
+    ocr: 'OCR 识别中',
+    qa_generating: 'QA 生成中',
     failed: '失败',
+    no_text: '无法识别文本',
   }
-  return map[status]
+  return map[status] ?? status
 }
 
 function statusClass(status: AdminDocument['status']) {
@@ -110,7 +210,8 @@ function statusClass(status: AdminDocument['status']) {
       <div class="upload-zone">
         <p>拖拽上传 PDF、Word 文件到此处</p>
         <p class="sub">支持 PDF、Word 格式，单文件不超过 50MB</p>
-        <button type="button" class="btn-primary">选择文件</button>
+        <input ref="fileInput" type="file" accept=".pdf,.docx" hidden @change="handleFileChange" />
+        <button type="button" class="btn-primary" @click="pickFile">选择文件</button>
       </div>
 
       <div class="table">
@@ -134,8 +235,23 @@ function statusClass(status: AdminDocument['status']) {
           <span>{{ doc.uploaded_by }}</span>
           <span>{{ doc.created_at.slice(0, 10) }}</span>
           <span class="actions">
-            <button type="button" class="link-btn">查看</button>
-            <button type="button" class="link-btn danger">删除</button>
+            <button
+              v-if="doc.status === 'ready' && doc.file_type === 'pdf'"
+              type="button"
+              class="link-btn"
+              @click="previewDoc(doc)"
+            >
+              查看
+            </button>
+            <button
+              v-if="doc.status === 'ready' || doc.status === 'failed'"
+              type="button"
+              class="link-btn"
+              @click="regenerateDoc(doc)"
+            >
+              重新解析
+            </button>
+            <button type="button" class="link-btn danger" @click="removeDoc(doc.id)">删除</button>
           </span>
         </div>
       </div>
@@ -180,6 +296,8 @@ function statusClass(status: AdminDocument['status']) {
       </div>
       <p v-else-if="!loading" class="empty">输入 Query 开始检索测试</p>
     </div>
+
+    <DocumentPreviewModal :source="previewSource" @close="previewSource = null" />
   </div>
 </template>
 

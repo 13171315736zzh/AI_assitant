@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { createTicket } from '@/services/ticketService'
 
+const props = defineProps<{ sessionId?: string | null }>()
 const emit = defineEmits<{ close: [] }>()
 
 const title = ref('差旅订票失败需人工协助')
@@ -9,14 +11,34 @@ const description = ref(
 )
 const submitted = ref(false)
 const ticketId = ref('')
+const submitting = ref(false)
+const errorMsg = ref('')
 
-function submit() {
+async function submit() {
   if (!title.value.trim() || !description.value.trim()) {
-    alert('请填写标题和描述')
+    errorMsg.value = '请填写标题和描述'
     return
   }
-  ticketId.value = 'WO20260325001'
-  submitted.value = true
+  submitting.value = true
+  errorMsg.value = ''
+  try {
+    const res = await createTicket({
+      session_id: props.sessionId ?? null,
+      title: title.value.trim(),
+      description: description.value.trim(),
+    })
+    if (res.code === 200 && res.data) {
+      ticketId.value = res.data.id
+      submitted.value = true
+    } else {
+      errorMsg.value = res.message || '提交失败'
+    }
+  } catch (err: unknown) {
+    const axiosErr = err as { response?: { data?: { message?: string } } }
+    errorMsg.value = axiosErr.response?.data?.message || '提交失败，请稍后重试'
+  } finally {
+    submitting.value = false
+  }
 }
 </script>
 
@@ -31,6 +53,7 @@ function submit() {
       </header>
 
       <div v-if="!submitted" class="modal-body">
+        <div v-if="errorMsg" class="error-msg">{{ errorMsg }}</div>
         <div class="field">
           <label>问题标题</label>
           <input v-model="title" type="text" placeholder="请输入问题标题" />
@@ -50,8 +73,14 @@ function submit() {
         <button type="button" class="btn-secondary" @click="emit('close')">
           {{ submitted ? '关闭' : '取消' }}
         </button>
-        <button v-if="!submitted" type="button" class="btn-primary" @click="submit">
-          提交工单
+        <button
+          v-if="!submitted"
+          type="button"
+          class="btn-primary"
+          :disabled="submitting"
+          @click="submit"
+        >
+          {{ submitting ? '提交中…' : '提交工单' }}
         </button>
       </footer>
     </div>
@@ -105,6 +134,11 @@ function submit() {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.error-msg {
+  color: var(--danger, #c0392b);
+  font-size: 13px;
 }
 
 .field {

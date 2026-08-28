@@ -96,7 +96,7 @@ export const mockMessagesBySession: Record<string, Message[]> = {
         '根据《国家能源集团差旅管理办法》第三章第十二条，其他人员鄂尔多斯地区住宿费不超过 300 元/天。',
       message_type: 'text',
       metadata: {
-        sources: [{ filename: '国家能源集团差旅管理办法2024修订版.pdf', clause: '第三章第十二条' }],
+        sources: [{ filename: '国家能源集团差旅管理办法2024修订版.pdf', clause: '第三章第十二条', document_id: 'doc_001' }],
       },
       created_at: '2026-03-19T10:15:10+08:00',
     },

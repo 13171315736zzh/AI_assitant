@@ -2,6 +2,11 @@
 import { ref, watch } from 'vue'
 import type { Task, TaskStep } from '@/types'
 import { fetchTask, cancelTask, confirmTask } from '@/services/taskService'
+import {
+  HIDDEN_RESULT_KEYS,
+  taskFieldLabel,
+  taskFieldValue,
+} from '@/utils/taskFieldLabels'
 
 const props = defineProps<{ taskId: string }>()
 
@@ -99,13 +104,21 @@ function openFormFromStep(step: TaskStep) {
 
             <div v-if="expandedStep === step.step_id" class="step-detail">
               <div v-if="Object.keys(step.params).length" class="params">
-                <div v-for="(val, key) in step.params" :key="key" class="param-row">
-                  <span class="param-key">{{ key }}</span>
-                  <span>{{ val }}</span>
+                <div v-for="(val, key) in step.params" :key="String(key)" class="param-row">
+                  <span class="param-key">{{ taskFieldLabel(String(key)) }}</span>
+                  <span>{{ taskFieldValue(val) }}</span>
                 </div>
               </div>
               <div v-if="step.result" class="result">
-                <span v-for="(val, key) in step.result" :key="key">{{ key }}: {{ val }}</span>
+                <div
+                  v-for="(val, key) in step.result"
+                  :key="String(key)"
+                  v-show="!HIDDEN_RESULT_KEYS.has(String(key))"
+                  class="param-row"
+                >
+                  <span class="param-key">{{ taskFieldLabel(String(key)) }}</span>
+                  <span>{{ taskFieldValue(val) }}</span>
+                </div>
               </div>
               <button
                 v-if="step.result?.form_id"
@@ -291,7 +304,14 @@ function openFormFromStep(step: TaskStep) {
 
 .param-key {
   color: var(--text-muted);
-  min-width: 80px;
+  min-width: 72px;
+  flex-shrink: 0;
+}
+
+.result {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .link-btn {

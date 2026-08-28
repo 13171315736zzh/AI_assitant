@@ -1,4 +1,6 @@
 import httpx
+import re
+
 from openai import AsyncOpenAI
 
 from pycore.core.exceptions import LLMError
@@ -66,3 +68,40 @@ def detect_message_type(content: str) -> str:
     if REJECT_MESSAGE[:20] in content or content.strip().startswith("抱歉，我目前只能协助"):
         return "reject"
     return "text"
+
+
+POLICY_DOC = {
+    "document_id": "doc_001",
+    "filename": "国家能源集团差旅管理办法2024修订版.pdf",
+}
+
+_POLICY_KEYWORDS = ("差旅", "住宿", "报销", "出差", "伙食", "交通", "标准", "政策", "制度", "规定", "鄂尔多斯")
+
+
+def is_policy_question(user_content: str) -> bool:
+    return any(kw in user_content for kw in _POLICY_KEYWORDS)
+
+
+def _extract_clause(text: str) -> str:
+    m = re.search(r"第[一二三四五六七八九十百]+章第[一二三四五六七八九十百]+条", text)
+    if m:
+        return m.group(0)
+    m = re.search(r"第[一二三四五六七八九十百]+条", text)
+    if m:
+        return m.group(0)
+    return "相关条款"
+
+
+def build_policy_metadata(user_content: str, assistant_content: str) -> dict | None:
+    if not is_policy_question(user_content):
+        return None
+    if detect_message_type(assistant_content) == "reject":
+        return None
+    return {
+        "sources": [
+            {
+                **POLICY_DOC,
+                "clause": _extract_clause(assistant_content),
+            }
+        ]
+    }

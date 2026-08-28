@@ -1,4 +1,5 @@
-:root {
+:root,
+[data-resolved-theme='light'] {
   --primary: #c11920;
   --primary-hover: #a01418;
   --accent: #f6ab00;
@@ -16,6 +17,24 @@
   --user-bubble-border: #f5c6c6;
   --radius-sm: 8px;
   --gradient-brand: linear-gradient(to right, #ffcf33 50%, #c11920);
+}
+
+[data-resolved-theme='dark'] {
+  --primary: #e04a52;
+  --primary-hover: #c11920;
+  --accent: #f6ab00;
+  --accent-light: #ffcf33;
+  --secondary: #e86a3a;
+  --success: #48b794;
+  --bg: #1a1d21;
+  --bg-warm: #22262c;
+  --surface: #2d3139;
+  --text: #e8eaed;
+  --text-secondary: #b0b4bb;
+  --text-muted: #8a8f98;
+  --border: #3d424b;
+  --user-bubble-bg: #3a2a2a;
+  --user-bubble-border: #5a3a3a;
 }
 
 *,

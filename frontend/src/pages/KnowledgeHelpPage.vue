@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
+import DocumentPreviewModal from '@/components/chat/DocumentPreviewModal.vue'
+import type { MessageSource } from '@/types'
 import type { DocumentItem, QAItem } from '@/services/knowledgeService'
 import { fetchKnowledgeDocuments, fetchKnowledgeQA, searchKnowledge } from '@/services/knowledgeService'
+import { downloadDocumentFile } from '@/services/documentPreviewService'
 
 const keyword = ref('')
 const qaList = ref<QAItem[]>([])
@@ -10,6 +13,7 @@ const documents = ref<DocumentItem[]>([])
 const expandedId = ref<string | null>(null)
 const activeCategory = ref('all')
 const loading = ref(false)
+const previewSource = ref<MessageSource | null>(null)
 
 const categories = [
   { id: 'all', label: '全部' },
@@ -50,6 +54,26 @@ async function handleSearch() {
 }
 
 onMounted(load)
+
+function previewDoc(doc: DocumentItem) {
+  if (doc.file_type !== 'pdf') {
+    alert('当前仅支持在线预览 PDF，Word 文档请使用下载')
+    return
+  }
+  previewSource.value = {
+    document_id: doc.id,
+    filename: doc.filename,
+    clause: '',
+  }
+}
+
+async function downloadDoc(doc: DocumentItem) {
+  try {
+    await downloadDocumentFile(doc.id, doc.filename)
+  } catch {
+    alert('下载失败，请稍后重试')
+  }
+}
 </script>
 
 <template>
@@ -116,8 +140,8 @@ onMounted(load)
                   <span class="doc-meta">{{ doc.file_type.toUpperCase() }} · 更新于 {{ doc.updated_at.slice(0, 10) }}</span>
                 </div>
                 <div class="doc-actions">
-                  <button type="button" class="link-btn">在线查看</button>
-                  <button type="button" class="link-btn">下载</button>
+                  <button type="button" class="link-btn" @click="previewDoc(doc)">在线查看</button>
+                  <button type="button" class="link-btn" @click="downloadDoc(doc)">下载</button>
                 </div>
               </div>
               <p v-if="!documents.length" class="empty">暂无文档</p>
@@ -126,6 +150,8 @@ onMounted(load)
         </main>
       </div>
     </div>
+
+    <DocumentPreviewModal :source="previewSource" @close="previewSource = null" />
   </div>
 </template>
 

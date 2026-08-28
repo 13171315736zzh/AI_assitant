@@ -1,6 +1,5 @@
 import type { ApiResponse, Message, PaginatedData, Session } from '@/types'
 import {
-  mockClearMemory,
   mockCreateSession,
   mockEndSession,
   mockMessages,
@@ -8,6 +7,7 @@ import {
   mockSessionList,
 } from '@/mocks/sessions'
 import api, { isMockMode } from './api'
+import { clearUserMemory } from './settingsService'
 
 export async function fetchSessions(userId: number): Promise<ApiResponse<PaginatedData<Session>>> {
   if (isMockMode('sessions')) {
@@ -158,13 +158,7 @@ export async function sendMessageStream(
 }
 
 export async function clearMemory(): Promise<ApiResponse<{ cleared: boolean }>> {
-  // B08 长期记忆接口未完成，暂始终走 Mock
-  if (isMockMode()) {
-    await delay(200)
-    return { code: 200, message: 'success', data: mockClearMemory() }
-  }
-  const { data } = await api.delete<ApiResponse<{ cleared: boolean }>>('/users/me/memory')
-  return data
+  return clearUserMemory()
 }
 
 function delay(ms: number) {

@@ -4,7 +4,7 @@ import { mockConfirmForm, mockGetForm, mockPreviewForm, mockSubmitForm } from '@
 import api, { isMockMode } from './api'
 
 export async function fetchForm(formId: string): Promise<ApiResponse<FormData>> {
-  if (isMockMode()) {
+  if (isMockMode('forms')) {
     await delay(150)
     const form = mockGetForm(formId)
     if (!form) return { code: 404, message: '表单不存在', data: null as unknown as FormData }
@@ -19,7 +19,7 @@ export async function previewForm(
   sessionId: string,
   taskId?: string,
 ): Promise<ApiResponse<FormData>> {
-  if (isMockMode()) {
+  if (isMockMode('forms')) {
     await delay(200)
     const form = mockPreviewForm(formType)
     void sessionId
@@ -34,7 +34,7 @@ export async function previewForm(
 }
 
 export async function confirmForm(formId: string): Promise<ApiResponse<{ form_id: string; status: string }>> {
-  if (isMockMode()) {
+  if (isMockMode('forms')) {
     const form = mockConfirmForm(formId)
     if (!form) return { code: 404, message: '表单不存在', data: null as unknown as { form_id: string; status: string } }
     return { code: 200, message: 'success', data: { form_id: form.form_id, status: form.status } }
@@ -47,7 +47,7 @@ export async function submitForm(
   formId: string,
   fields: Record<string, string>,
 ): Promise<ApiResponse<{ form_id: string; status: string; receipt_id: string; message: string }>> {
-  if (isMockMode()) {
+  if (isMockMode('forms')) {
     await delay(300)
     const receipt = mockSubmitForm(formId, fields)
     return {
@@ -66,7 +66,7 @@ export async function submitForm(
 }
 
 export async function fetchReceipt(formId: string): Promise<ApiResponse<FormReceipt>> {
-  if (isMockMode()) {
+  if (isMockMode('forms')) {
     return {
       code: 200,
       message: 'success',

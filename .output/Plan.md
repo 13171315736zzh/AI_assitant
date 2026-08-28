@@ -108,15 +108,15 @@
 | B01 | 用户登录与鉴权 | B00 | auth/login, auth/me | 代码完成，待用户测试 |
 | B02 | 会话与消息 CRUD | B01 | sessions/* | 已完成（含前端联调切换） |
 | B03 | Agent 对话与流式回复 | B02 | messages, stream | 已完成（POST 联调 + SSE） |
-| B04 | 任务与工作记忆 | B03 | tasks/* | 待开发 |
-| B05 | 业务表单 Mock | B03 | forms/* | 待开发 |
-| B06 | 知识库上传与索引 | B01 | admin/documents | 待开发 |
-| B07 | RAG 检索与问答 | B06 | knowledge/*, search-test | 待开发 |
-| B08 | 长期记忆读写 | B02 | settings/memory, DELETE memory | 待开发 |
-| B09 | 个人设置 | B01 | settings/theme, version | 待开发 |
-| B10 | Mock 工单 | B02 | tickets/* | 待开发 |
-| B11 | 对话监控 | B02 | admin/conversations | 待开发 |
-| B12 | 系统设置 | B01 | admin/settings | 待开发 |
+| B04 | 任务与工作记忆 | B03 | tasks/* | 已完成（含前端联调） |
+| B05 | 业务表单 Mock | B03 | forms/* | 已完成（含前端联调） |
+| B06 | 知识库上传与索引 | B01 | admin/documents | 已完成（含 OCR 重解析） |
+| B07 | RAG 检索与问答 | B06 | knowledge/*, search-test | 已完成（含 Agent 联调） |
+| B08 | 长期记忆读写 | B02 | settings/memory, DELETE memory | 已完成（终端测试通过） |
+| B09 | 个人设置 | B01 | settings/theme, version | 已完成（终端测试通过） |
+| B10 | Mock 工单 | B02 | tickets/* | 代码完成，待用户测试 |
+| B11 | 对话监控 | B02 | admin/conversations | 代码完成，待用户测试 |
+| B12 | 系统设置 | B01 | admin/settings | 代码完成，待用户测试 |
 
 > 每个功能开发前须在本文件对应功能下方写入分层实现思路；完成后更新状态并提供测试指令。
 
@@ -318,39 +318,281 @@ curl -N -H "Authorization: Bearer $TOKEN" \
 
 ### B04：任务与工作记忆
 
-（待开发时补充）
+**分层实现思路：**
+
+```
+db/task_models.py       → TaskRecord ORM（steps_json 存步骤 DAG）
+models/task.py          → TaskPublic, TaskStepPublic, Confirm/Update 请求体
+repositories/task.py    → get_by_id（用户隔离）、create、update
+services/task.py        → 任务详情、取消、确认、改参
+api/routes/tasks.py     → GET /tasks/{id}, POST cancel/confirm, PATCH steps
+db/seed.py              → task_001 演示数据（对齐 Mock）
+frontend/taskService.ts → VITE_MOCK_TASKS=false 切换真实 API
+```
+
+**接口：** `GET /api/tasks/{id}`、`POST .../cancel`、`POST .../confirm`、`PATCH .../steps/{step_id}`
+
+**测试指令（B04）：**
+
+```bash
+# 1. 启动后端（若未运行）
+cd backend && source .venv/bin/activate
+PYTHONPATH=../.. python3 -m uvicorn src.main:app --reload --port 8000
+
+# 2. 登录获取 token
+TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"user_a","password":"usera123"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['access_token'])")
+
+# 3. 获取任务详情
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/tasks/task_001
+
+# 4. 取消任务
+curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/tasks/task_001/cancel
+
+# 前端联调：frontend/.env 设置 VITE_MOCK_TASKS=false
+# user_a 登录 → 打开 sess_001 → 点击任务卡片 → 侧栏展示进度
+```
 
 ### B05：业务表单 Mock
 
-（待开发时补充）
+**分层实现思路：**
+
+```
+db/form_models.py       → FormRecord ORM（fields_json、回执信息）
+models/form.py          → FormPublic、Preview/Submit 请求体
+repositories/form.py    → CRUD + 用户隔离
+services/form.py        → 预览模板、确认、提交、回执（Mock 审批流）
+api/routes/forms.py     → preview/confirm/submit/receipt + GET 详情
+db/seed.py              → form_001 差旅演示表单
+frontend/formService.ts → VITE_MOCK_FORMS=false
+```
+
+**接口：** `POST /api/forms/{type}/preview`、`GET /api/forms/{id}`、`POST .../confirm`、`POST .../submit`、`GET .../receipt`
+
+**测试指令（B05）：**
+
+```bash
+# 1. 登录
+TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"user_a","password":"usera123"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['access_token'])")
+
+# 2. 获取差旅表单
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/forms/form_001
+
+# 3. 确认 → 提交
+curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/forms/form_001/confirm
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  http://localhost:8000/api/forms/form_001/submit -d '{"fields":{"destination":"鄂尔多斯"}}'
+
+# 前端：user_a → 神东出差 → 任务侧栏 → 查看差旅申请单 → 预览/确认/提交
+```
 
 ### B06：知识库上传与索引
 
-（待开发时补充）
+**分层实现思路：**
+
+```
+db/knowledge_models.py       → DocumentRecord、QARecord、DocumentChunkRecord
+models/knowledge.py          → 文档/QA/检索契约模型
+repositories/knowledge.py    → 文档、QA、分块 CRUD
+integrations/document_parser → PDF/DOCX 文本提取与分块
+services/knowledge.py        → 上传、索引、列表、删除
+api/routes/knowledge.py      → admin/documents + employee knowledge 路由
+db/seed.py                   → doc_001/doc_002 + QA + chunks
+frontend                     → VITE_MOCK_KNOWLEDGE=false
+```
+
+**依赖安装（用户执行）：**
+
+```bash
+cd backend && source .venv/bin/activate
+python3 -m pip install pypdf
+```
+
+**测试指令（B06）：**
+
+```bash
+ADMIN_TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin123"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['access_token'])")
+
+curl -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:8000/api/admin/documents
+curl -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:8000/api/admin/qa
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/knowledge/documents
+```
 
 ### B07：RAG 检索与问答
 
-（待开发时补充）
+**分层实现思路：**
+
+```
+integrations/text_similarity.py → QA/分块相似度（Jaccard + SequenceMatcher）
+services/knowledge.py         → RagService（QA≥0.8 直出，否则分块+LLM）
+services/agent.py             → 政策类问题优先走 RAG
+api/routes/knowledge.py       → GET search、POST admin/search-test
+```
+
+**测试指令（B07）：**
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -X POST http://localhost:8000/api/admin/search-test \
+  -d '{"query":"鄂尔多斯住宿费标准是多少"}'
+
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:8000/api/knowledge/search?q=鄂尔多斯"
+
+# 对话页发送：鄂尔多斯出差住宿费标准是多少？
+# 预期：QA 直出或 RAG 回答，带来源引用
+```
 
 ### B08：长期记忆
 
-（待开发时补充）
+**分层实现思路：**
+
+```
+db/user_settings_models.py  → UserSettingsRecord（theme、memory_enabled、memory_items_json、structured_json）
+models/settings.py          → MemoryPublic、MemoryUpdateRequest、ClearMemoryPublic
+repositories/user_settings.py → 按 user_id 读写
+services/settings.py        → get/update memory、clear_memory
+api/routes/settings.py      → GET/PATCH /api/settings/memory
+api/routes/users.py         → DELETE /api/users/me/memory
+db/seed.py                  → user_a 演示记忆数据
+frontend/settingsService.ts → VITE_MOCK_SETTINGS=false
+```
+
+**测试指令（B08）：**
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"user_a","password":"usera123"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['access_token'])")
+
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/settings/memory
+curl -X DELETE -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/users/me/memory
+```
 
 ### B09：个人设置
 
-（待开发时补充）
+**分层实现思路：**
+
+```
+services/settings.py        → profile/theme/version
+api/routes/settings.py      → GET profile、GET/PATCH theme、GET version、POST version/check
+frontend/ThemeSettingsPage、VersionSettingsPage → 联调真实 API
+frontend/utils/theme.ts     → 深色模式 CSS 变量
+```
+
+**测试指令（B09）：**
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/settings/profile
+curl -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  http://localhost:8000/api/settings/theme -d '{"theme":"dark"}'
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/settings/version
+```
 
 ### B10：Mock 工单
 
-（待开发时补充）
+**分层实现思路：**
+
+```
+db/ticket_models.py         → TicketRecord（id, user_id, session_id, title, description, status）
+models/ticket.py            → TicketCreateRequest, TicketPublic, TicketStatusPublic
+repositories/ticket.py      → create / get_by_id
+services/ticket.py          → 校验 session 归属后创建工单
+api/routes/tickets.py       → POST /api/tickets, GET /api/tickets/{id}
+frontend/ticketService.ts   → createTicket / fetchTicket
+frontend/TicketModal.vue    → 联调真实 API，传入当前 session_id
+```
+
+**前端 Mock 切换：** 工单无独立 Mock，直接走真实 API（`.env` 无需额外开关）。
+
+**测试指令（B10）：**
+
+前端：
+1. 以 `user_a` 登录，进入对话页，打开任意会话
+2. 点击顶部「人工协助」，填写标题/描述后提交
+3. 预期：显示工单号（格式 `WO20260828XXXX`），状态「待处理」
+
+终端：
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"user_a","password":"usera123"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['access_token'])")
+
+curl -s -X POST http://localhost:8000/api/tickets \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"session_id":"sess_001","title":"差旅订票失败","description":"需人工协助"}'
+
+curl -s http://localhost:8000/api/tickets/WO20260828D64C \
+  -H "Authorization: Bearer $TOKEN"
+```
 
 ### B11：对话监控
 
-（待开发时补充）
+**分层实现思路：**
+
+```
+repositories/session.py     → list_all_admin / get_stats / get_by_id_admin
+services/admin.py           → AdminConversationService（stats / list / detail / export）
+api/routes/admin.py         → GET stats、list、detail、export、export/file
+frontend/adminService.ts    → isMockMode('admin')，exportConversations + downloadExportFile
+frontend/ConversationsMonitorPage.vue → 导出 CSV 联调
+```
+
+**前端 Mock 切换：** `VITE_MOCK_ADMIN=false`
+
+**测试指令（B11）：**
+
+前端（admin 账号）：
+1. 登录 `admin/admin123`，进入「对话监控」
+2. 预期：顶部统计卡片显示总会话/活跃/今日新增
+3. 列表可搜索、筛选状态，点击「查看」弹出详情（含消息预览、任务摘要）
+4. 点击「导出记录」，预期下载 `conversations.csv`
+
+终端：
+```bash
+ADMIN=$(curl -s -X POST http://localhost:8000/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin123"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['access_token'])")
+
+curl -s http://localhost:8000/api/admin/conversations/stats -H "Authorization: Bearer $ADMIN"
+curl -s 'http://localhost:8000/api/admin/conversations?page=1&page_size=5' -H "Authorization: Bearer $ADMIN"
+curl -s http://localhost:8000/api/admin/conversations/sess_001 -H "Authorization: Bearer $ADMIN"
+```
 
 ### B12：系统设置
 
-（待开发时补充）
+**分层实现思路：**
+
+```
+db/system_config_models.py  → SystemConfigRecord（单行 JSON 配置）
+repositories/system_config.py → get / save，缺省写入 DEFAULT_SYSTEM_CONFIG
+services/admin.py           → SystemConfigService
+api/routes/admin.py         → GET/PUT /api/admin/settings
+frontend/adminService.ts    → fetchSystemConfig / updateSystemConfig（admin Mock 关闭）
+frontend/SystemSettingsPage.vue → 联调真实 API
+```
+
+**前端 Mock 切换：** `VITE_MOCK_ADMIN=false`
+
+**测试指令（B12）：**
+
+前端（admin 账号）：
+1. 进入「系统设置」，预期加载默认配置（系统名称、欢迎语、模型等）
+2. 修改「欢迎语」后保存，刷新页面预期保留修改
+
+终端：
+```bash
+curl -s http://localhost:8000/api/admin/settings -H "Authorization: Bearer $ADMIN"
+curl -s -X PUT http://localhost:8000/api/admin/settings \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+  -d '{"welcome_message":"您好，国能智能助手为您服务"}'
+```
 
 ---
 
@@ -372,3 +614,8 @@ curl -N -H "Authorization: Bearer $TOKEN" \
 | 2026-08-27 | 前端启动：初始化 Vue3 项目，完成 P01/P02/P07/P08，管理后台与帮助页骨架 |
 | 2026-08-27 | 前端续开发：P03 任务侧栏、P04 差旅表单、P05/P06/P09/P10 完整 Mock 页 |
 | 2026-08-27 | B03 Agent 对话：DashScope LLM + 拒识策略 + SSE 流式 |
+| 2026-08-28 | B04 任务与工作记忆：tasks API + 前端联调 |
+| 2026-08-28 | B05 业务表单 Mock：forms 全流程 API + form_001 种子数据 |
+| 2026-08-28 | B08 长期记忆 + B09 个人设置：settings API + P07 联调 |
+| 2026-08-28 | B06 知识库 + B07 RAG：documents/QA/检索 + Agent 政策问答 + OCR 重解析 |
+| 2026-08-28 | B10 工单 + B11 对话监控 + B12 系统设置：tickets/admin API + 前端联调 |
