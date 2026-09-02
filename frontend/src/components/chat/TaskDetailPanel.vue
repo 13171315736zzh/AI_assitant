@@ -7,6 +7,7 @@ import {
   taskFieldLabel,
   taskFieldValue,
 } from '@/utils/taskFieldLabels'
+import { isTravelTask, openOaTravelApply } from '@/utils/oaTravel'
 
 const props = defineProps<{ taskId: string }>()
 
@@ -52,7 +53,14 @@ async function handleCancel() {
 async function handleConfirm() {
   if (!task.value) return
   const res = await confirmTask(props.taskId, task.value.current_step)
-  if (res.code === 200) await load()
+  if (res.code !== 200) return
+  await load()
+  if (task.value && isTravelTask(task.value)) {
+    const opened = openOaTravelApply(props.taskId)
+    if (!opened) {
+      alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 差旅申请页。')
+    }
+  }
 }
 
 function openFormFromStep(step: TaskStep) {

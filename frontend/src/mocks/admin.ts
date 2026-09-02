@@ -150,7 +150,7 @@ export const mockAdminConversations: AdminConversation[] = [
 
 export let mockSystemConfig: SystemConfig = {
   system_name: '智能办公助手 · 国能集团',
-  welcome_message: '您好，我是智能办公助手，有什么可以帮您？',
+  welcome_message: '您好，我是国能办公助手，有什么可以帮您？',
   default_model: 'qwen-max',
   temperature: 0.7,
   session_retention_days: 90,

@@ -44,10 +44,11 @@ async def list_documents(
 @router.get("/documents/{document_id}/download")
 async def download_document(
     document_id: str,
+    filename: str | None = Query(None),
     _: UserPublic = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await _service(db).get_document_file(document_id)
+    result = await _service(db).get_document_file(document_id, filename)
     if result is None:
         return JSONResponse(status_code=404, content=error("文档不存在", code=404))
     file_path, filename, media_type = result

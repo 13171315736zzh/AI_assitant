@@ -2,10 +2,12 @@
 import { ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/useAuthStore'
+import { useChatStore } from '@/stores/useChatStore'
 
 const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
+const chat = useChatStore()
 
 const username = ref('user_a')
 const password = ref('usera123')
@@ -13,6 +15,7 @@ const password = ref('usera123')
 async function handleSubmit() {
   const ok = await auth.login(username.value, password.value)
   if (ok) {
+    chat.reset()
     const redirect = (route.query.redirect as string) || '/chat'
     router.push(redirect)
   }

@@ -15,7 +15,11 @@ OCR_SYSTEM = (
 )
 
 
-async def ocr_pdf_to_text(file_path: Path, max_pages: int = 20) -> str:
+async def ocr_pdf_to_text(
+    file_path: Path,
+    max_pages: int = 20,
+    on_page_done=None,
+) -> str:
     """扫描版 PDF：渲染为图片后调用 DashScope 视觉模型识别文字。"""
     settings = get_settings()
     if not settings.llm_api_key:
@@ -74,6 +78,8 @@ async def ocr_pdf_to_text(file_path: Path, max_pages: int = 20) -> str:
             if text:
                 parts.append(text)
             logger.info("PDF OCR page done", page=index + 1, chars=len(text))
+            if on_page_done:
+                await on_page_done(index + 1, page_count)
     except Exception as exc:
         logger.error("PDF OCR failed", error=str(exc))
     finally:

@@ -23,27 +23,63 @@ const loading = ref(false)
 const previewSource = ref<MessageSource | null>(null)
 
 const fileInput = ref<HTMLInputElement | null>(null)
+const pollingDocIds = ref<Set<string>>(new Set())
+const docProgressStage = ref<Record<string, string>>({})
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function applyDocumentProgress(
+  docId: string,
+  status: string,
+  stage: string,
+  percent: number,
+) {
+  docProgressStage.value = { ...docProgressStage.value, [docId]: stage }
+  const idx = documents.value.findIndex((d) => d.id === docId)
+  if (idx < 0) return
+  documents.value[idx] = {
+    ...documents.value[idx],
+    status: status as AdminDocument['status'],
+    progress_percent: status === 'ready' ? undefined : percent,
+  }
+}
+
+async function refreshDocsSilent() {
+  const res = await fetchAdminDocuments()
+  if (res.code === 200) documents.value = res.data.items
+}
+
 async function pollDocument(docId: string) {
-  for (let i = 0; i < 90; i++) {
-    await delay(2000)
-    const res = await fetchDocumentProgress(docId)
-    if (res.code !== 200) continue
-    const { status } = res.data
-    await loadDocs()
-    if (status === 'ready') {
-      await loadQA()
-      alert('文档已入库，QA 已自动生成')
-      return
+  if (pollingDocIds.value.has(docId)) return
+  pollingDocIds.value = new Set([...pollingDocIds.value, docId])
+  try {
+    for (let i = 0; i < 400; i++) {
+      const res = await fetchDocumentProgress(docId)
+      if (res.code === 200 && res.data) {
+        const { status, progress } = res.data
+        applyDocumentProgress(docId, status, progress.stage, progress.percent)
+        if (status === 'ready') {
+          await refreshDocsSilent()
+          await loadQA()
+          alert('文档已入库，QA 已自动生成')
+          return
+        }
+        if (status === 'failed') {
+          await refreshDocsSilent()
+          alert('文档处理失败，请重试或重新上传')
+          return
+        }
+      }
+      const stage = docProgressStage.value[docId] ?? ''
+      await delay(stage.startsWith('ocr:') ? 1000 : 1500)
     }
-    if (status === 'failed') {
-      alert('文档处理失败，请重试或重新上传')
-      return
-    }
+    alert('文档处理超时，请稍后刷新页面查看状态')
+  } finally {
+    const next = new Set(pollingDocIds.value)
+    next.delete(docId)
+    pollingDocIds.value = next
   }
 }
 
@@ -161,8 +197,19 @@ function statusLabel(status: AdminDocument['status'] | string) {
     qa_generating: 'QA 生成中',
     failed: '失败',
     no_text: '无法识别文本',
+    ocr_done: 'OCR 完成',
   }
   return map[status] ?? status
+}
+
+function displayStatus(doc: AdminDocument) {
+  const stage = docProgressStage.value[doc.id] ?? ''
+  const ocrMatch = stage.match(/^ocr:(\d+)\/(\d+)$/)
+  if (ocrMatch) {
+    return `OCR 识别中 (${ocrMatch[1]}/${ocrMatch[2]})`
+  }
+  if (stage === 'ocr' || stage === 'ocr_done') return statusLabel('ocr')
+  return statusLabel(doc.status)
 }
 
 function statusClass(status: AdminDocument['status']) {
@@ -228,8 +275,10 @@ function statusClass(status: AdminDocument['status']) {
           <span>{{ doc.file_type.toUpperCase() }}</span>
           <span>
             <span class="status-tag" :class="statusClass(doc.status)">
-              {{ statusLabel(doc.status) }}
-              <template v-if="doc.progress_percent"> {{ doc.progress_percent }}%</template>
+              {{ displayStatus(doc) }}
+              <template v-if="doc.progress_percent != null && doc.status !== 'ready'">
+                {{ doc.progress_percent }}%
+              </template>
             </span>
           </span>
           <span>{{ doc.uploaded_by }}</span>

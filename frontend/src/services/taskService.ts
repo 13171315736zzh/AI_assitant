@@ -1,6 +1,54 @@
-import type { ApiResponse, Task } from '@/types'
-import { mockCancelTask, mockConfirmTask, mockGetTask } from '@/mocks/tasks'
+import type { ApiResponse, PaginatedData, Task, TaskSummary } from '@/types'
+import { mockCancelTask, mockConfirmTask, mockGetTask, mockListTasks } from '@/mocks/tasks'
+import { buildTaskSummary } from '@/utils/taskCatalog'
 import api, { isMockMode } from './api'
+
+export async function listTasks(params?: {
+  status?: 'running' | 'completed' | 'cancelled'
+  category?: TaskSummary['category']
+  page?: number
+  page_size?: number
+}): Promise<ApiResponse<PaginatedData<TaskSummary>>> {
+  const page = params?.page ?? 1
+  const pageSize = params?.page_size ?? 20
+  const status = params?.status
+  const category = params?.category
+
+  if (isMockMode('tasks')) {
+    await delay(200)
+    let items = mockListTasks().map(buildTaskSummary)
+    if (status === 'cancelled') {
+      items = items.filter((t) => t.status === 'cancelled')
+    } else if (status === 'running') {
+      items = items.filter((t) => t.status === 'running')
+    } else if (status === 'completed') {
+      items = items.filter((t) => t.status === 'completed')
+    } else {
+      items = items.filter((t) => t.status !== 'cancelled')
+    }
+    if (category) {
+      items = items.filter((t) => t.category === category)
+    }
+    items.sort((a, b) => b.created_at.localeCompare(a.created_at))
+    const total = items.length
+    const start = (page - 1) * pageSize
+    return {
+      code: 200,
+      message: 'success',
+      data: {
+        items: items.slice(start, start + pageSize),
+        total,
+        page,
+        page_size: pageSize,
+      },
+    }
+  }
+
+  const { data } = await api.get<ApiResponse<PaginatedData<TaskSummary>>>('/tasks', {
+    params: { status, category, page, page_size: pageSize },
+  })
+  return data
+}
 
 export async function fetchTask(taskId: string): Promise<ApiResponse<Task>> {
   if (isMockMode('tasks')) {

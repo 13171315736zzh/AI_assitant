@@ -14,6 +14,17 @@ const FIELD_LABELS: Record<string, string> = {
   form_id: '表单编号',
   order_id: '订单编号',
   flight_no: '航班号',
+  provider: '数据来源',
+  selected: '已选方案',
+  alternatives: '备选方案',
+  max_price: '价格上限',
+  max_distance_km: '距离上限(km)',
+  room_type: '房型',
+  arrival_before: '到达时限',
+  route: '航线',
+  preference: '偏好',
+  city: '城市',
+  nights: '晚数',
   status: '状态',
 }
 
@@ -30,7 +41,7 @@ const VALUE_LABELS: Record<string, string> = {
 }
 
 /** result 区不重复展示的字段（已有专门入口） */
-export const HIDDEN_RESULT_KEYS = new Set(['form_id'])
+export const HIDDEN_RESULT_KEYS = new Set(['form_id', 'provider', 'alternatives'])
 
 export function taskFieldLabel(key: string): string {
   return FIELD_LABELS[key] ?? key
@@ -38,6 +49,16 @@ export function taskFieldLabel(key: string): string {
 
 export function taskFieldValue(value: unknown): string {
   if (value === null || value === undefined) return '—'
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>
+    if ('flight_no' in obj) {
+      return `${obj.flight_no} ${obj.departure_time ?? ''} → ${obj.arrival_time ?? ''}`.trim()
+    }
+    if ('name' in obj && 'price_per_night' in obj) {
+      return `${obj.name} ${obj.price_per_night}元/晚`
+    }
+    return JSON.stringify(obj)
+  }
   const str = String(value)
   return VALUE_LABELS[str] ?? str
 }

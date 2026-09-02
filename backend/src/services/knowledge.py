@@ -14,7 +14,14 @@ from src.integrations.document_parser import (
     new_document_id,
     split_text,
 )
-from src.integrations.llm_factory import create_llm_provider
+from src.agent.policy_context import (
+    build_policy_search_query,
+    format_policy_snippets,
+    is_travel_policy_context,
+    should_show_policy_with_question,
+    trim_excerpt,
+)
+from src.agent.travel_policy_rules import parse_travel_context
 from src.integrations.text_similarity import text_similarity
 from src.models.knowledge import (
     AdminDocumentPublic,
@@ -127,9 +134,11 @@ class KnowledgeService:
         ]
         return items, total
 
-    async def get_document_file(self, document_id: str) -> tuple[Path, str, str] | None:
-        record = await self.repo.get_document(document_id)
-        if record is None or record.status != "ready":
+    async def get_document_file(
+        self, document_id: str, filename: str | None = None
+    ) -> tuple[Path, str, str] | None:
+        record = await self.repo.find_document_for_source(document_id, filename)
+        if record is None:
             return None
         path = Path(record.file_path)
         if not path.is_file():
@@ -219,11 +228,15 @@ async def _process_document_async(document_id: str) -> None:
         if record is None:
             return
 
+        async def _persist_progress() -> None:
+            await repo.save_document(record)
+            await db.commit()
+
         try:
             record.status = "parsing"
             record.stage = "parsing"
             record.progress_percent = 20
-            await repo.save_document(record)
+            await _persist_progress()
 
             file_path = Path(record.file_path)
 
@@ -231,28 +244,49 @@ async def _process_document_async(document_id: str) -> None:
                 record.status = "parsing"
                 record.stage = "ocr"
                 record.progress_percent = 30
-                await repo.save_document(record)
+                await _persist_progress()
+
+            async def _mark_ocr_page(page: int, total: int) -> None:
+                record.status = "parsing"
+                record.stage = f"ocr:{page}/{total}"
+                # OCR 阶段占 30%–40%
+                record.progress_percent = 30 + int((page / max(total, 1)) * 10)
+                await _persist_progress()
 
             text = await extract_document_text_async(
-                file_path, record.file_type, on_ocr_start=_mark_ocr_start
+                file_path,
+                record.file_type,
+                on_ocr_start=_mark_ocr_start,
+                on_ocr_page=_mark_ocr_page,
             )
             if not text.strip():
                 logger.error("Document has no extractable text", document_id=document_id)
                 record.status = "failed"
                 record.stage = "no_text"
                 record.progress_percent = 0
-                await repo.save_document(record)
+                await _persist_progress()
                 return
+
+            from src.agent.travel_policy_rules import discover_rule_ids_from_text
+
+            if "差旅" in text or "出差" in text:
+                discovered = discover_rule_ids_from_text(text)
+                if discovered:
+                    logger.info(
+                        "Travel policy rules discovered in document",
+                        document_id=document_id,
+                        rules=discovered,
+                    )
 
             if record.file_type == "pdf" and not extract_pdf_text(file_path).strip():
                 record.stage = "ocr_done"
                 record.progress_percent = 40
-                await repo.save_document(record)
+                await _persist_progress()
 
             record.status = "indexing"
             record.stage = "indexing"
             record.progress_percent = 45
-            await repo.save_document(record)
+            await _persist_progress()
 
             chunk_pairs: list[tuple[str, str]] = []
             chunks: list[DocumentChunkRecord] = []
@@ -270,17 +304,19 @@ async def _process_document_async(document_id: str) -> None:
                     )
                 )
             await repo.replace_chunks(document_id, chunks)
+            await db.commit()
 
             record.status = "qa_generating"
             record.stage = "qa_generating"
             record.progress_percent = 75
-            await repo.save_document(record)
+            await _persist_progress()
 
             from src.integrations.qa_extractor import build_qa_records, extract_qa_from_chunks
 
             qa_items = await extract_qa_from_chunks(chunk_pairs)
             qa_records = build_qa_records(document_id, qa_items)
             await repo.replace_qa(document_id, qa_records)
+            await db.commit()
             logger.info(
                 "Document QA generated",
                 document_id=document_id,
@@ -290,13 +326,13 @@ async def _process_document_async(document_id: str) -> None:
             record.status = "ready"
             record.stage = "ready"
             record.progress_percent = 100
-            await repo.save_document(record)
+            await _persist_progress()
         except Exception as exc:
             logger.error("Document indexing failed", document_id=document_id, error=str(exc))
             record.status = "failed"
             record.stage = "failed"
             record.progress_percent = 0
-            await repo.save_document(record)
+            await _persist_progress()
 
 
 class RagService:
@@ -330,6 +366,127 @@ class RagService:
         results.sort(key=lambda item: item.similarity, reverse=True)
         return SearchTestData(results=results[:10])
 
+    async def enrich_sources(self, metadata: dict | None) -> dict | None:
+        if not metadata:
+            return metadata
+        sources = metadata.get("sources")
+        if not isinstance(sources, list) or not sources:
+            return metadata
+        enriched: list[dict] = []
+        for raw in sources:
+            if not isinstance(raw, dict):
+                continue
+            doc = await self.repo.find_document_for_source(
+                raw.get("document_id"), raw.get("filename")
+            )
+            item = dict(raw)
+            if doc:
+                item["document_id"] = doc.id
+                item["filename"] = doc.filename
+            if not item.get("excerpt") and item.get("document_id"):
+                excerpt = await self._find_excerpt_for_source(
+                    item.get("document_id"), item.get("clause"), item.get("filename")
+                )
+                if excerpt:
+                    item["excerpt"] = excerpt
+            enriched.append(item)
+        return {**metadata, "sources": enriched}
+
+    async def find_policy_excerpts(
+        self, user_content: str, assistant_content: str = "", limit: int = 2
+    ) -> list[dict]:
+        ctx = parse_travel_context(user_content)
+        query = build_policy_search_query(user_content, assistant_content)
+        if ctx.trip_days and ctx.trip_days > 7:
+            query = f"{query} 出差包干制 第二十九条 超过7天"
+        if ctx.origin and ctx.destination:
+            query = f"{query} {ctx.origin} {ctx.destination} 城市间交通 第十六条 住宿标准"
+        chunks = await self._retrieve_chunks(query, limit=limit)
+        if not chunks and query != user_content:
+            chunks = await self._retrieve_chunks(user_content, limit=limit)
+        results: list[dict] = []
+        for chunk, doc, _ in chunks:
+            if doc is None:
+                continue
+            results.append(self._chunk_to_source(chunk, doc))
+        return results
+
+    async def build_reply_metadata(
+        self,
+        user_content: str,
+        assistant_content: str,
+        metadata: dict | None,
+        prefetched_excerpts: list[dict] | None = None,
+        policy_reminders: list | None = None,
+    ) -> dict | None:
+        metadata = await self.enrich_sources(metadata)
+        sources = list((metadata or {}).get("sources") or [])
+
+        if policy_reminders:
+            doc_name = "国能数智科技开发（北京）有限公司差旅费管理实施细则（试行）.pdf"
+            from src.agent.travel_policy_rules import reminders_to_sources
+
+            sources.extend(reminders_to_sources(policy_reminders, doc_name))
+
+        if should_show_policy_with_question(user_content, assistant_content) or policy_reminders:
+            excerpts = prefetched_excerpts or await self.find_policy_excerpts(
+                user_content, assistant_content
+            )
+            if excerpts:
+                sources.extend(excerpts)
+
+        if not sources:
+            return metadata
+        metadata = dict(metadata or {})
+        metadata["sources"] = self._dedupe_sources(sources)
+        if policy_reminders:
+            metadata["policy_reminders"] = [
+                {
+                    "rule_id": item.rule_id,
+                    "title": item.title,
+                    "message": item.message,
+                    "clause": item.clause,
+                }
+                for item in policy_reminders
+            ]
+        return metadata
+
+    def _chunk_to_source(self, chunk, doc) -> dict:
+        return {
+            "document_id": doc.id,
+            "filename": doc.filename,
+            "clause": chunk.source_clause,
+            "excerpt": trim_excerpt(chunk.content),
+        }
+
+    async def _find_excerpt_for_source(
+        self, document_id: str | None, clause: str | None, filename: str | None
+    ) -> str | None:
+        chunks = await self.repo.list_chunks(document_id)
+        if not chunks and filename:
+            doc = await self.repo.find_document_for_source(document_id, filename)
+            if doc:
+                chunks = await self.repo.list_chunks(doc.id)
+        if not chunks:
+            return None
+        if clause:
+            for chunk in chunks:
+                if clause in (chunk.source_clause or "") or clause in chunk.content:
+                    return trim_excerpt(chunk.content)
+        return trim_excerpt(chunks[0].content)
+
+    @staticmethod
+    def _dedupe_sources(sources: list[dict]) -> list[dict]:
+        seen: set[str] = set()
+        unique: list[dict] = []
+        for item in sources:
+            key = f"{item.get('document_id')}::{item.get('clause')}::{item.get('excerpt', '')[:40]}"
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        return unique
+
     async def try_answer(self, user_content: str) -> dict | None:
         from src.integrations.llm_factory import is_policy_question
 
@@ -356,6 +513,7 @@ class RagService:
                             "document_id": qa.document_id,
                             "filename": doc.filename if doc else "",
                             "clause": qa.source_clause,
+                            "excerpt": trim_excerpt(qa.answer),
                         }
                     ]
                 },
@@ -400,13 +558,7 @@ class RagService:
             filename = doc.filename if doc else ""
             context_parts.append(f"[{filename} · {chunk.source_clause}]\n{chunk.content}")
             if doc:
-                sources.append(
-                    {
-                        "document_id": doc.id,
-                        "filename": doc.filename,
-                        "clause": chunk.source_clause,
-                    }
-                )
+                sources.append(self._chunk_to_source(chunk, doc))
 
         system_prompt = (
             "你是企业差旅与报销政策问答助手。请仅依据提供的政策片段回答用户问题。\n"
@@ -415,6 +567,7 @@ class RagService:
             "2. 若片段不足以回答，说明无法从现有政策中找到依据\n"
             "3. 不要重复自我介绍\n"
             "4. 多个要点请分段，使用「一、」「二、」格式\n"
+            "5. 若需用户确认职级、目的地等以适用差旅标准，须先引用政策原文中的具体标准数值，再提出追问\n"
         )
         context_block = "\n\n".join(context_parts)
         messages = [

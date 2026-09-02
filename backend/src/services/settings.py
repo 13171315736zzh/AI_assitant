@@ -1,3 +1,4 @@
+from src.agent.user_memory import is_position_confirmed
 from src.config.settings import get_settings
 from src.db.user_model import User
 from src.db.user_settings_models import UserSettingsRecord
@@ -13,9 +14,12 @@ from src.models.settings import (
     ThemeUpdateRequest,
     VersionCheckPublic,
     VersionPublic,
+    WelcomePublic,
 )
+from src.repositories.system_config import SystemConfigRepository
 from src.repositories.user import UserRepository
 from src.repositories.user_settings import UserSettingsRepository
+from src.services.admin import SystemConfigService
 
 DEMO_MEMORY_ITEMS = [
     {"key": "常用出差目的地", "value": "鄂尔多斯、北京"},
@@ -77,9 +81,11 @@ class SettingsService:
         self,
         settings_repo: UserSettingsRepository,
         user_repo: UserRepository,
+        system_config_repo: SystemConfigRepository | None = None,
     ):
         self.settings_repo = settings_repo
         self.user_repo = user_repo
+        self.system_config_repo = system_config_repo
 
     async def _get_user(self, user_id: int) -> User:
         user = await self.user_repo.get_by_id(user_id)
@@ -161,3 +167,63 @@ class SettingsService:
         record.structured_json = _base_structured(user)
         await self.settings_repo.save(record)
         return ClearMemoryPublic(cleared=True)
+
+    async def build_agent_memory_snippets(self, user_id: int) -> str:
+        from src.agent.user_memory import build_user_memory_snippets
+
+        user = await self._get_user(user_id)
+        record = await self._get_or_create_settings(user)
+        return build_user_memory_snippets(
+            display_name=user.display_name,
+            structured=dict(record.structured_json or {}),
+            memory_items=list(record.memory_items_json or []),
+            memory_enabled=record.memory_enabled,
+        )
+
+    async def try_extract_position_from_message(
+        self,
+        user_id: int,
+        user_content: str,
+        assistant_context: str | None = None,
+    ) -> bool:
+        from src.agent.user_memory import extract_position, is_position_confirmed
+
+        user = await self._get_user(user_id)
+        record = await self._get_or_create_settings(user)
+        if not record.memory_enabled:
+            return False
+        structured = dict(record.structured_json or _base_structured(user))
+        if is_position_confirmed(structured.get("position")):
+            return False
+        position = extract_position(user_content, assistant_context)
+        if not position:
+            return False
+        structured["position"] = position
+        record.structured_json = structured
+        items = [dict(item) for item in record.memory_items_json or []]
+        updated = False
+        for item in items:
+            if item.get("key") == "职位":
+                item["value"] = position
+                updated = True
+                break
+        if not updated:
+            items.append({"key": "职位", "value": position})
+        record.memory_items_json = items
+        await self.settings_repo.save(record)
+        return True
+
+    async def get_confirmed_position(self, user_id: int) -> str | None:
+        user = await self._get_user(user_id)
+        record = await self._get_or_create_settings(user)
+        structured = dict(record.structured_json or {})
+        position = (structured.get("position") or "").strip()
+        if is_position_confirmed(position):
+            return position
+        return None
+
+    async def get_welcome(self) -> WelcomePublic:
+        if self.system_config_repo is None:
+            return WelcomePublic(welcome_message="您好，我是国能办公助手，有什么可以帮您？")
+        config = await SystemConfigService(self.system_config_repo).get_config()
+        return WelcomePublic(welcome_message=config.welcome_message)

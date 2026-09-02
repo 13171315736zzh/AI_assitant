@@ -6,6 +6,7 @@ const route = useRoute()
 
 const navItems = [
   { name: 'admin-knowledge', label: '知识库管理', path: '/admin/knowledge' },
+  { name: 'admin-project-mapping', label: '项目城市映射', path: '/admin/project-mapping' },
   { name: 'admin-conversations', label: '对话监控', path: '/admin/conversations' },
   { name: 'admin-settings', label: '系统设置', path: '/admin/settings' },
 ]

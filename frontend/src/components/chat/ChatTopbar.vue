@@ -14,11 +14,13 @@ const auth = useAuthStore()
 
 const adminLinks = [
   { name: 'admin-knowledge', label: '知识库管理', path: '/admin/knowledge' },
+  { name: 'admin-project-mapping', label: '项目映射', path: '/admin/project-mapping' },
   { name: 'admin-conversations', label: '对话监控', path: '/admin/conversations' },
   { name: 'admin-settings', label: '系统设置', path: '/admin/settings' },
 ]
 
 const isAdminRoute = computed(() => route.path.startsWith('/admin'))
+const isMyTasksActive = computed(() => route.name === 'my-tasks')
 
 function goSettings() {
   router.push({ name: 'settings-account' })
@@ -26,6 +28,10 @@ function goSettings() {
 
 function goHelp() {
   router.push({ name: 'knowledge-help' })
+}
+
+function goMyTasks() {
+  router.push({ name: 'my-tasks' })
 }
 
 function goAdmin(path: string) {
@@ -38,6 +44,14 @@ function goAdmin(path: string) {
     <div class="topbar-inner">
       <div class="product-name">智能办公助手</div>
       <nav class="topbar-actions">
+        <button
+          type="button"
+          class="topbar-link"
+          :class="{ 'link-active': isMyTasksActive }"
+          @click="goMyTasks"
+        >
+          我的任务
+        </button>
         <button type="button" class="topbar-link" @click="goHelp">知识库帮助</button>
         <button type="button" class="topbar-link" @click="emit('ticket')">人工协助</button>
         <button type="button" class="topbar-link" @click="emit('clearMemory')">清除记忆</button>
@@ -108,6 +122,12 @@ function goAdmin(path: string) {
 .topbar-link:hover {
   color: var(--accent);
   background: rgba(246, 171, 0, 0.08);
+}
+
+.topbar-link.link-active {
+  color: var(--primary);
+  background: #fdf2f2;
+  font-weight: 600;
 }
 
 .admin-divider {

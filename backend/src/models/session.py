@@ -41,6 +41,29 @@ class MessageCreate(BaseModel):
     content: str = Field(..., min_length=1, max_length=8000)
 
 
+class BookingSelectionConfirm(BaseModel):
+    flight_no: str | None = None
+    hotel_name: str | None = None
+
+
+class RoomSelectionConfirm(BaseModel):
+    room: str = Field(..., min_length=1, max_length=32)
+
+
+class WorkpackagePlanConfirm(BaseModel):
+    confirmed: bool = True
+    project: str | None = Field(default=None, max_length=128)
+
+
+class WorkpackageConfirm(BaseModel):
+    confirmed: bool = True
+    entries: list[dict[str, Any]] | None = None
+
+
+class PlanConfirm(BaseModel):
+    confirmed: bool = True
+
+
 class SendMessageData(BaseModel):
     user_message: MessagePublic
     assistant_message: MessagePublic

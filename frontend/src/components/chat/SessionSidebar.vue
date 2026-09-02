@@ -5,12 +5,14 @@ defineProps<{
   sessions: Session[]
   activeId: string | null
   loading?: boolean
+  deletingSessionId?: string | null
 }>()
 
 const emit = defineEmits<{
   select: [id: string]
   newSession: []
   endSession: []
+  deleteSession: [id: string]
 }>()
 
 function formatTime(iso: string) {
@@ -42,6 +44,16 @@ function formatTime(iso: string) {
         :class="{ active: session.id === activeId }"
         @click="emit('select', session.id)"
       >
+        <button
+          type="button"
+          class="btn-delete"
+          aria-label="删除对话"
+          title="删除对话"
+          :disabled="deletingSessionId === session.id"
+          @click.stop="emit('deleteSession', session.id)"
+        >
+          ×
+        </button>
         <div class="session-title">{{ session.title }}</div>
         <div class="session-meta">
           <span class="session-time">{{ formatTime(session.updated_at) }}</span>
@@ -105,7 +117,7 @@ function formatTime(iso: string) {
 
 .session-item {
   position: relative;
-  padding: 12px 12px 12px 16px;
+  padding: 12px 28px 12px 16px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   margin-bottom: 4px;
@@ -114,6 +126,33 @@ function formatTime(iso: string) {
 
 .session-item:hover {
   background: var(--bg);
+}
+
+.btn-delete {
+  position: absolute;
+  top: 8px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+
+.session-item:hover .btn-delete,
+.session-item.active .btn-delete {
+  opacity: 1;
+}
+
+.btn-delete:hover {
+  background: rgba(192, 57, 43, 0.1);
+  color: var(--danger, #c0392b);
 }
 
 .session-item.active {

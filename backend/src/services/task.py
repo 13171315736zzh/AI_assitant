@@ -1,8 +1,10 @@
+from src.agent.task_catalog import build_task_summary
 from src.models.task import (
     TaskConfirmPublic,
     TaskPublic,
     TaskStatusPublic,
     TaskStepPublic,
+    TaskSummaryPublic,
 )
 from src.repositories.task import TaskRepository
 
@@ -25,6 +27,33 @@ def _to_task_public(record) -> TaskPublic:
 class TaskService:
     def __init__(self, task_repo: TaskRepository):
         self.task_repo = task_repo
+
+    async def list_tasks(
+        self,
+        user_id: int,
+        page: int,
+        page_size: int,
+        status: str | None = None,
+        category: str | None = None,
+    ) -> tuple[list[TaskSummaryPublic], int]:
+        records = await self.task_repo.list_all_by_user(user_id)
+        summaries = [TaskSummaryPublic(**build_task_summary(r)) for r in records]
+
+        if status == "running":
+            summaries = [s for s in summaries if s.status == "running"]
+        elif status == "completed":
+            summaries = [s for s in summaries if s.status == "completed"]
+        elif status == "cancelled":
+            summaries = [s for s in summaries if s.status == "cancelled"]
+        else:
+            summaries = [s for s in summaries if s.status != "cancelled"]
+
+        if category:
+            summaries = [s for s in summaries if s.category == category]
+
+        total = len(summaries)
+        start = (page - 1) * page_size
+        return summaries[start : start + page_size], total
 
     async def get_task(self, user_id: int, task_id: str) -> TaskPublic | None:
         record = await self.task_repo.get_by_id(task_id, user_id)

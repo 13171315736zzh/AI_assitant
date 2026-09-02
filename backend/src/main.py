@@ -13,13 +13,16 @@ from src.api.routes.settings import router as settings_router
 from src.api.routes.sessions import router as sessions_router
 from src.api.routes.tasks import router as tasks_router
 from src.api.routes.tickets import router as tickets_router
+from src.api.routes.project_mapping import router as project_mapping_router
 from src.api.routes.users import router as users_router
 from src.config.settings import get_settings
+from src.integrations.llm_factory import verify_llm_connection
 from src.db.seed import (
     seed_demo_forms,
     seed_demo_sessions,
     seed_demo_tasks,
     seed_knowledge,
+    seed_project_mappings,
     seed_user_settings,
     seed_users,
 )
@@ -46,6 +49,11 @@ async def startup() -> None:
     await seed_demo_forms()
     await seed_user_settings()
     await seed_knowledge()
+    await seed_project_mappings()
+    if await verify_llm_connection():
+        logger.info("LLM connectivity check passed")
+    else:
+        logger.warning("LLM connectivity check failed; chat replies may be unavailable")
 
 
 server = APIServer(
@@ -77,6 +85,7 @@ app.include_router(settings_router.router)
 app.include_router(users_router.router)
 app.include_router(tickets_router.router)
 app.include_router(admin_router.router)
+app.include_router(project_mapping_router.router)
 
 
 @app.exception_handler(HTTPException)

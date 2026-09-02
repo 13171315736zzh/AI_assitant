@@ -6,6 +6,7 @@ from src.api.responses import success
 from src.db.session import get_db
 from src.models.settings import MemoryUpdateRequest, ThemeUpdateRequest
 from src.models.user import UserPublic
+from src.repositories.system_config import SystemConfigRepository
 from src.repositories.user import UserRepository
 from src.repositories.user_settings import UserSettingsRepository
 from src.services.settings import SettingsService
@@ -15,7 +16,11 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
 def _service(db: AsyncSession) -> SettingsService:
-    return SettingsService(UserSettingsRepository(db), UserRepository(db))
+    return SettingsService(
+        UserSettingsRepository(db),
+        UserRepository(db),
+        SystemConfigRepository(db),
+    )
 
 
 @router.get("/profile")
@@ -25,6 +30,15 @@ async def get_profile(
 ):
     profile = await _service(db).get_profile(current_user.id)
     return success(profile.model_dump())
+
+
+@router.get("/welcome")
+async def get_welcome(
+    _: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    welcome = await _service(db).get_welcome()
+    return success(welcome.model_dump())
 
 
 @router.get("/theme")

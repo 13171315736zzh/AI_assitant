@@ -134,7 +134,7 @@ export function mockPreviewForm(formType: FormType): FormData {
         to: 'limanager@ceic.com',
         cc: '',
         subject: '神东项目出差安排确认',
-        body: '李经理，您好！\n\n计划于下周三前往神东项目现场…',
+        body: '赵士廷经理，您好！\n\n烦请知悉，我计划于下周三前往神东项目现场…\n\n此致\n敬礼',
       },
     },
   }

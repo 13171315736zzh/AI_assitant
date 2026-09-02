@@ -1,7 +1,7 @@
 import secrets
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.chat_models import MessageRecord, SessionRecord
@@ -133,6 +133,19 @@ class SessionRepository:
         await self.db.flush()
         await self.db.refresh(record)
         return record
+
+    async def delete(self, record: SessionRecord) -> None:
+        from src.db.form_models import FormRecord
+        from src.db.task_models import TaskRecord
+        from src.db.ticket_models import TicketRecord
+
+        session_id = record.id
+        await self.db.execute(delete(MessageRecord).where(MessageRecord.session_id == session_id))
+        await self.db.execute(delete(TaskRecord).where(TaskRecord.session_id == session_id))
+        await self.db.execute(delete(FormRecord).where(FormRecord.session_id == session_id))
+        await self.db.execute(delete(TicketRecord).where(TicketRecord.session_id == session_id))
+        await self.db.delete(record)
+        await self.db.flush()
 
 
 class MessageRepository:

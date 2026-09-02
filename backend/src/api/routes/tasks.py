@@ -1,10 +1,10 @@
-from fastapi import Depends
+from fastapi import Depends, Query
 from fastapi.responses import JSONResponse
 from pycore.api import APIRouter
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import get_current_user
-from src.api.responses import error, success
+from src.api.responses import error, paginated, success
 from src.db.session import get_db
 from src.models.task import TaskConfirmRequest, TaskStepUpdateRequest
 from src.models.user import UserPublic
@@ -16,6 +16,24 @@ router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 def _service(db: AsyncSession) -> TaskService:
     return TaskService(TaskRepository(db))
+
+
+@router.get("")
+async def list_tasks(
+    status: str | None = Query(None, description="running|completed|cancelled"),
+    category: str | None = Query(
+        None, description="travel|meeting|workpackage|email|other"
+    ),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    items, total = await svc.list_tasks(
+        current_user.id, page, page_size, status, category
+    )
+    return paginated([i.model_dump() for i in items], total, page, page_size)
 
 
 @router.get("/{task_id}")

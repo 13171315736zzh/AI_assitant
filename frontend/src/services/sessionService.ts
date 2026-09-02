@@ -1,6 +1,7 @@
 import type { ApiResponse, Message, PaginatedData, Session } from '@/types'
 import {
   mockCreateSession,
+  mockDeleteSession,
   mockEndSession,
   mockMessages,
   mockSendMessage,
@@ -51,6 +52,23 @@ export async function endSession(sessionId: string): Promise<ApiResponse<Session
   return data
 }
 
+export async function deleteSession(
+  sessionId: string,
+): Promise<ApiResponse<{ deleted: boolean }>> {
+  if (isMockMode('sessions')) {
+    await delay(150)
+    const deleted = mockDeleteSession(sessionId)
+    if (!deleted) {
+      return { code: 404, message: '会话不存在', data: { deleted: false } }
+    }
+    return { code: 200, message: 'success', data: { deleted: true } }
+  }
+  const { data } = await api.delete<ApiResponse<{ deleted: boolean }>>(`/sessions/${sessionId}`, {
+    timeout: 30000,
+  })
+  return data
+}
+
 export async function sendMessage(
   sessionId: string,
   content: string,
@@ -78,7 +96,11 @@ export async function sendMessage(
 export interface StreamMessageHandlers {
   onUser?: (message: Message) => void
   onAck?: (content: string) => void
-  onDone?: (data: { user_message: Message; assistant_message: Message }) => void
+  onDone?: (data: {
+    user_message: Message
+    assistant_message: Message
+    session_title?: string
+  }) => void
   onError?: (message: string) => void
 }
 
@@ -111,7 +133,11 @@ export async function sendMessageStream(
       handlers.onAck?.(ack)
       await delay(ack === acks[acks.length - 1] ? 400 : 280)
     }
-    handlers.onDone?.({ user_message: result[0], assistant_message: result[1] })
+    handlers.onDone?.({
+      user_message: result[0],
+      assistant_message: result[1],
+      session_title: result[2],
+    })
     return
   }
 
@@ -146,7 +172,13 @@ export async function sendMessageStream(
         } else if (parsed.event === 'ack' && typeof payload.content === 'string') {
           handlers.onAck?.(payload.content)
         } else if (parsed.event === 'done') {
-          handlers.onDone?.(payload as { user_message: Message; assistant_message: Message })
+          handlers.onDone?.(
+            payload as {
+              user_message: Message
+              assistant_message: Message
+              session_title?: string
+            },
+          )
         } else if (parsed.event === 'error') {
           handlers.onError?.((payload.message as string) ?? '发送失败')
         }
@@ -155,6 +187,98 @@ export async function sendMessageStream(
       }
     }
   }
+}
+
+export async function confirmBookingSelection(
+  sessionId: string,
+  payload: { flight_no?: string; hotel_name?: string },
+): Promise<
+  ApiResponse<{
+    user_message: Message
+    assistant_message: Message
+    session_title?: string
+  }>
+> {
+  const { data } = await api.post(`/sessions/${encodeURIComponent(sessionId)}/booking-selection`, payload)
+  return data
+}
+
+export async function confirmRoomSelection(
+  sessionId: string,
+  room: string,
+): Promise<
+  ApiResponse<{
+    user_message: Message
+    assistant_message: Message
+    session_title?: string
+  }>
+> {
+  const { data } = await api.post(`/sessions/${encodeURIComponent(sessionId)}/room-selection`, { room })
+  return data
+}
+
+export async function confirmWorkpackagePlan(
+  sessionId: string,
+  payload?: { project?: string },
+): Promise<
+  ApiResponse<{
+    user_message: Message
+    assistant_message: Message
+    session_title?: string
+  }>
+> {
+  const { data } = await api.post(
+    `/sessions/${encodeURIComponent(sessionId)}/workpackage-plan-confirm`,
+    { confirmed: true, project: payload?.project ?? null },
+  )
+  return data
+}
+
+export async function confirmWorkpackageFill(
+  sessionId: string,
+  payload?: { entries?: import('@/types').TimesheetEntry[] },
+): Promise<
+  ApiResponse<{
+    user_message: Message
+    assistant_message: Message
+    session_title?: string
+  }>
+> {
+  const { data } = await api.post(`/sessions/${encodeURIComponent(sessionId)}/workpackage-confirm`, {
+    confirmed: true,
+    entries: payload?.entries ?? null,
+  })
+  return data
+}
+
+export async function confirmTravelPlan(
+  sessionId: string,
+): Promise<
+  ApiResponse<{
+    user_message: Message
+    assistant_message: Message
+    session_title?: string
+  }>
+> {
+  const { data } = await api.post(`/sessions/${encodeURIComponent(sessionId)}/travel-plan-confirm`, {
+    confirmed: true,
+  })
+  return data
+}
+
+export async function confirmMeetingPlan(
+  sessionId: string,
+): Promise<
+  ApiResponse<{
+    user_message: Message
+    assistant_message: Message
+    session_title?: string
+  }>
+> {
+  const { data } = await api.post(`/sessions/${encodeURIComponent(sessionId)}/meeting-plan-confirm`, {
+    confirmed: true,
+  })
+  return data
 }
 
 export async function clearMemory(): Promise<ApiResponse<{ cleared: boolean }>> {

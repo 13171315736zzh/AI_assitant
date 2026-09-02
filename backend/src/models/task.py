@@ -43,3 +43,20 @@ class TaskConfirmPublic(BaseModel):
     id: str
     status: str
     current_step: int
+
+
+class TaskSummaryPublic(BaseModel):
+    id: str
+    session_id: str
+    goal: str
+    status: str
+    raw_status: str
+    category: str
+    category_label: str
+    tags: list[str] = Field(default_factory=list)
+    completed_steps: int
+    total_steps: int
+    progress_percent: int
+    current_step: int
+    replan_count: int
+    created_at: str

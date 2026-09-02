@@ -223,23 +223,42 @@ async def seed_user_settings() -> None:
             "gender": "unknown",
         }
 
-        for username, _, _, role, employee_id in SEED_ACCOUNTS:
+        for username, _, display_name, role, employee_id in SEED_ACCOUNTS:
             user = await user_repo.get_by_username(username)
             if user is None:
                 continue
-            if await settings_repo.get_by_user_id(user.id) is not None:
+            existing = await settings_repo.get_by_user_id(user.id)
+            if existing is not None:
+                if username == "user_a":
+                    structured = dict(existing.structured_json or {})
+                    if not structured.get("related_projects"):
+                        structured["related_projects"] = demo_structured["related_projects"]
+                        existing.structured_json = structured
                 continue
             if username == "user_a":
                 memory_items = demo_memory_items
-                structured = demo_structured
-            else:
+                structured = dict(demo_structured)
+            elif role == "admin":
                 memory_items = []
                 structured = {
                     "employee_id": employee_id,
                     "department": "",
-                    "position": "管理员" if role == "admin" else "员工",
+                    "position": "管理员",
                     "email": "",
                     "travel_mode_preference": "",
+                    "related_projects": [],
+                    "gender": "unknown",
+                }
+            else:
+                memory_items = [
+                    {"key": "沟通偏好", "value": "简洁回复，优先表格展示"},
+                ]
+                structured = {
+                    "employee_id": employee_id,
+                    "department": "",
+                    "position": "员工",
+                    "email": "",
+                    "travel_mode_preference": "经济舱",
                     "related_projects": [],
                     "gender": "unknown",
                 }
@@ -403,3 +422,39 @@ async def seed_knowledge() -> None:
                     keywords_json=[],
                 )
             )
+
+
+async def seed_project_mappings() -> None:
+    from src.db.project_mapping_models import ProjectMappingRecord
+    from src.repositories.project_mapping import ProjectMappingRepository
+
+    async with get_session() as db:
+        repo = ProjectMappingRepository(db)
+        if await repo.count() > 0:
+            return
+        defaults = [
+            ProjectMappingRecord(
+                id="proj_yanbao",
+                project_name="燕宝能源",
+                aliases="雁宝,燕宝,燕宝可视化二期,雁宝能源",
+                city="呼伦贝尔",
+                district="海拉尔区",
+                address="燕宝能源大厦",
+                policy_city="海拉尔",
+                remark="驻场办公点",
+                updated_by="admin",
+            ),
+            ProjectMappingRecord(
+                id="proj_shendong",
+                project_name="神东能源数据治理平台",
+                aliases="神东项目,神东能源",
+                city="鄂尔多斯",
+                district="",
+                address="神东能源大厦",
+                policy_city="鄂尔多斯",
+                remark="",
+                updated_by="admin",
+            ),
+        ]
+        for record in defaults:
+            await repo.create(record)

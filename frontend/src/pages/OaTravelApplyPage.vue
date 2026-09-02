@@ -1,0 +1,672 @@
+<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
+import { useAuthStore } from '@/stores/useAuthStore'
+import { fetchTask } from '@/services/taskService'
+import { fetchForm } from '@/services/formService'
+import { formFieldLabels } from '@/mocks/forms'
+import type { FlightOption, HotelOption, Task } from '@/types'
+import {
+  findFlightSelection,
+  findHotelSelection,
+  findTravelFormId,
+  formatOaDate,
+} from '@/utils/oaTravel'
+
+const route = useRoute()
+const auth = useAuthStore()
+
+const loading = ref(true)
+const error = ref<string | null>(null)
+const task = ref<Task | null>(null)
+const fields = ref<Record<string, string>>({})
+const flight = ref<FlightOption | null>(null)
+const hotel = ref<HotelOption | null>(null)
+const submitted = ref(false)
+
+const taskId = computed(() => String(route.params.taskId ?? ''))
+const labels = formFieldLabels.travel
+
+const applicationNo = computed(() => {
+  const receipt = task.value?.steps.find((s) => s.tool === 'travel_apply')?.result?.receipt_id
+  if (typeof receipt === 'string' && receipt) return receipt
+  return `TA-${taskId.value.replace(/^task_/, '').toUpperCase()}`
+})
+
+const tripDays = computed(() => {
+  const dep = fields.value.departure_date
+  const ret = fields.value.return_date
+  if (!dep || !ret) return '—'
+  const start = new Date(dep)
+  const end = new Date(ret)
+  const diff = Math.round((end.getTime() - start.getTime()) / 86400000) + 1
+  return diff > 0 ? `${diff} 天` : '—'
+})
+
+const approvalChain = computed(() => [
+  { role: '申请人', name: auth.user?.display_name ?? '—', status: 'done', time: '刚刚' },
+  { role: '部门负责人', name: '待指定', status: 'pending', time: '—' },
+  { role: '分管领导', name: '待指定', status: 'pending', time: '—' },
+  { role: '行政审批', name: '差旅管理岗', status: 'pending', time: '—' },
+])
+
+async function load() {
+  loading.value = true
+  error.value = null
+  try {
+    const taskRes = await fetchTask(taskId.value)
+    if (taskRes.code !== 200 || !taskRes.data) {
+      error.value = taskRes.message || '任务不存在'
+      return
+    }
+    task.value = taskRes.data
+    flight.value = findFlightSelection(taskRes.data)
+    hotel.value = findHotelSelection(taskRes.data)
+
+    const formId = findTravelFormId(taskRes.data)
+    if (!formId) {
+      error.value = '未找到关联的差旅申请表单'
+      return
+    }
+    const formRes = await fetchForm(formId)
+    if (formRes.code !== 200 || !formRes.data) {
+      error.value = formRes.message || '表单加载失败'
+      return
+    }
+    fields.value = { ...formRes.data.fields }
+  } catch {
+    error.value = '加载失败，请返回助手重试'
+  } finally {
+    loading.value = false
+  }
+}
+
+function handleSubmit() {
+  submitted.value = true
+}
+
+function closeWindow() {
+  window.close()
+}
+
+onMounted(load)
+</script>
+
+<template>
+  <div class="oa-shell">
+    <header class="oa-topbar">
+      <div class="oa-brand">
+        <span class="oa-logo">CE</span>
+        <div>
+          <div class="oa-title">国能集团 · 差旅管理系统</div>
+          <div class="oa-subtitle">China Energy Travel Management · OA Module</div>
+        </div>
+      </div>
+      <div class="oa-user">
+        <span>{{ auth.user?.display_name ?? '员工' }}</span>
+        <span class="oa-user-id">{{ auth.user?.employee_id ?? '' }}</span>
+      </div>
+    </header>
+
+    <nav class="oa-nav">
+      <span class="nav-item">首页</span>
+      <span class="nav-sep">/</span>
+      <span class="nav-item">差旅管理</span>
+      <span class="nav-sep">/</span>
+      <span class="nav-item active">出差申请</span>
+    </nav>
+
+    <main class="oa-main">
+      <div v-if="loading" class="oa-state">正在同步智能助手填报数据…</div>
+      <div v-else-if="error" class="oa-state error">{{ error }}</div>
+
+      <template v-else>
+        <div class="sync-banner">
+          <span class="sync-icon">↗</span>
+          <div>
+            <strong>数据已从「智能办公助手」同步</strong>
+            <p>以下内容为助手根据对话自动预填，请在 OA 系统中核对后提交审批。</p>
+          </div>
+          <span class="sync-tag">自动同步</span>
+        </div>
+
+        <section class="oa-card">
+          <header class="card-head">
+            <h1>出差申请单</h1>
+            <div class="head-meta">
+              <span class="badge draft">草稿</span>
+              <span class="app-no">单号：{{ applicationNo }}</span>
+            </div>
+          </header>
+
+          <div class="section-title">一、基本信息</div>
+          <table class="oa-table">
+            <tbody>
+              <tr>
+                <th>申请人</th>
+                <td>{{ auth.user?.display_name ?? '—' }}</td>
+                <th>工号</th>
+                <td>{{ auth.user?.employee_id ?? '—' }}</td>
+              </tr>
+              <tr>
+                <th>所属部门</th>
+                <td>智能矿山事业部</td>
+                <th>申请日期</th>
+                <td>{{ formatOaDate(new Date().toISOString()) }}</td>
+              </tr>
+              <tr>
+                <th>关联项目</th>
+                <td colspan="3">{{ fields.project || '—' }}</td>
+              </tr>
+              <tr>
+                <th>出差说明</th>
+                <td colspan="3">{{ fields.description || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="section-title">二、行程信息</div>
+          <table class="oa-table">
+            <tbody>
+              <tr>
+                <th>{{ labels.destination }}</th>
+                <td>{{ fields.destination || '—' }}</td>
+                <th>出差天数</th>
+                <td>{{ tripDays }}</td>
+              </tr>
+              <tr>
+                <th>{{ labels.departure_date }}</th>
+                <td>{{ formatOaDate(fields.departure_date) }}</td>
+                <th>{{ labels.return_date }}</th>
+                <td>{{ formatOaDate(fields.return_date) }}</td>
+              </tr>
+              <tr>
+                <th>{{ labels.transport }}</th>
+                <td colspan="3">{{ fields.transport || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="section-title">三、交通预订（国能商旅）</div>
+          <table v-if="flight" class="oa-table booking-table">
+            <thead>
+              <tr>
+                <th>航班号</th>
+                <th>航空公司</th>
+                <th>出发</th>
+                <th>到达</th>
+                <th>舱位</th>
+                <th>参考价</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>{{ flight.flight_no }}</td>
+                <td>{{ flight.airline }}</td>
+                <td>{{ flight.departure_time }}</td>
+                <td>{{ flight.arrival_time }}</td>
+                <td>{{ flight.cabin }}</td>
+                <td>{{ flight.price }} 元</td>
+                <td><span class="status-ok">已选方案</span></td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="empty-hint">本次行程未预订交通，可在商旅平台另行下单。</p>
+
+          <div class="section-title">四、酒店预订（国能商旅）</div>
+          <table v-if="hotel" class="oa-table booking-table">
+            <thead>
+              <tr>
+                <th>酒店名称</th>
+                <th>地址</th>
+                <th>房型</th>
+                <th>入住 / 离店</th>
+                <th>单价</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>{{ hotel.name }}</td>
+                <td>{{ hotel.address }}</td>
+                <td>{{ hotel.room_type }}</td>
+                <td>{{ hotel.check_in }} 至 {{ hotel.check_out }}</td>
+                <td>{{ hotel.price_per_night }} 元/晚</td>
+                <td><span class="status-ok">已选方案</span></td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="empty-hint">本次行程未预订酒店。</p>
+
+          <div class="section-title">五、审批流程</div>
+          <div class="approval-flow">
+            <div
+              v-for="(node, idx) in approvalChain"
+              :key="node.role"
+              class="approval-node"
+              :class="node.status"
+            >
+              <div class="node-dot">{{ idx + 1 }}</div>
+              <div class="node-body">
+                <div class="node-role">{{ node.role }}</div>
+                <div class="node-name">{{ node.name }}</div>
+                <div class="node-time">{{ node.time }}</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <footer class="oa-footer">
+          <p class="footer-note">本页面为 OA 差旅系统模拟环境，提交后将进入演示审批流程。</p>
+          <div class="footer-actions">
+            <button type="button" class="btn-secondary" @click="closeWindow">关闭窗口</button>
+            <button
+              type="button"
+              class="btn-primary"
+              :disabled="submitted"
+              @click="handleSubmit"
+            >
+              {{ submitted ? '已提交审批' : '提交审批' }}
+            </button>
+          </div>
+        </footer>
+
+        <div v-if="submitted" class="submit-toast">
+          <strong>提交成功</strong>
+          <p>差旅申请 {{ applicationNo }} 已进入 OA 审批流程（演示）。</p>
+        </div>
+      </template>
+    </main>
+  </div>
+</template>
+
+<style scoped>
+.oa-shell {
+  min-height: 100vh;
+  background: #eef2f7;
+  color: #1f2937;
+  font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+.oa-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 32px;
+  height: 64px;
+  background: linear-gradient(90deg, #0b3d91 0%, #1565c0 100%);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(11, 61, 145, 0.25);
+}
+
+.oa-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.oa-logo {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.15);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 1px;
+}
+
+.oa-title {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.oa-subtitle {
+  font-size: 11px;
+  opacity: 0.75;
+  margin-top: 2px;
+}
+
+.oa-user {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  font-size: 14px;
+}
+
+.oa-user-id {
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.oa-nav {
+  padding: 12px 32px;
+  font-size: 13px;
+  color: #64748b;
+  background: #fff;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.nav-item.active {
+  color: #1565c0;
+  font-weight: 600;
+}
+
+.nav-sep {
+  margin: 0 8px;
+  color: #cbd5e1;
+}
+
+.oa-main {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 24px 24px 48px;
+}
+
+.oa-state {
+  text-align: center;
+  padding: 80px 24px;
+  color: #64748b;
+  font-size: 15px;
+}
+
+.oa-state.error {
+  color: #dc2626;
+}
+
+.sync-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 16px 20px;
+  margin-bottom: 20px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+}
+
+.sync-banner strong {
+  display: block;
+  color: #1e40af;
+  margin-bottom: 4px;
+}
+
+.sync-banner p {
+  margin: 0;
+  font-size: 13px;
+  color: #475569;
+}
+
+.sync-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #2563eb;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.sync-tag {
+  margin-left: auto;
+  align-self: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.oa-card {
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+  overflow: hidden;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.card-head h1 {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.head-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.badge {
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.badge.draft {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.app-no {
+  font-size: 13px;
+  color: #64748b;
+}
+
+.section-title {
+  padding: 16px 24px 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #0f172a;
+  border-top: 1px solid #f1f5f9;
+}
+
+.section-title:first-of-type {
+  border-top: none;
+}
+
+.oa-table {
+  width: calc(100% - 48px);
+  margin: 0 24px 8px;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.oa-table th,
+.oa-table td {
+  border: 1px solid #e2e8f0;
+  padding: 10px 14px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.oa-table > tbody > tr > th {
+  width: 120px;
+  background: #f8fafc;
+  color: #475569;
+  font-weight: 500;
+}
+
+.booking-table thead th {
+  background: #f1f5f9;
+  color: #475569;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.status-ok {
+  color: #059669;
+  font-weight: 600;
+}
+
+.empty-hint {
+  margin: 0 24px 16px;
+  font-size: 13px;
+  color: #94a3b8;
+}
+
+.approval-flow {
+  display: flex;
+  gap: 0;
+  padding: 8px 24px 24px;
+  overflow-x: auto;
+}
+
+.approval-node {
+  display: flex;
+  gap: 10px;
+  flex: 1;
+  min-width: 140px;
+  position: relative;
+  padding-right: 16px;
+}
+
+.approval-node:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  top: 14px;
+  left: 28px;
+  right: 0;
+  height: 2px;
+  background: #e2e8f0;
+  z-index: 0;
+}
+
+.approval-node.done:not(:last-child)::after {
+  background: #93c5fd;
+}
+
+.node-dot {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #e2e8f0;
+  color: #64748b;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+  z-index: 1;
+}
+
+.approval-node.done .node-dot {
+  background: #2563eb;
+  color: #fff;
+}
+
+.node-body {
+  padding-top: 2px;
+}
+
+.node-role {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.node-name {
+  font-size: 14px;
+  font-weight: 600;
+  margin-top: 2px;
+}
+
+.node-time {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 2px;
+}
+
+.oa-footer {
+  margin-top: 20px;
+  padding: 16px 20px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.footer-note {
+  margin: 0;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.footer-actions {
+  display: flex;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.btn-primary,
+.btn-secondary {
+  height: 38px;
+  padding: 0 20px;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+  border: none;
+}
+
+.btn-primary {
+  background: #1565c0;
+  color: #fff;
+}
+
+.btn-primary:disabled {
+  background: #94a3b8;
+  cursor: default;
+}
+
+.btn-secondary {
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  color: #475569;
+}
+
+.submit-toast {
+  position: fixed;
+  bottom: 32px;
+  right: 32px;
+  width: 320px;
+  padding: 16px 20px;
+  background: #fff;
+  border: 1px solid #86efac;
+  border-left: 4px solid #059669;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+}
+
+.submit-toast strong {
+  color: #059669;
+  display: block;
+  margin-bottom: 4px;
+}
+
+.submit-toast p {
+  margin: 0;
+  font-size: 13px;
+  color: #475569;
+}
+</style>

@@ -4,6 +4,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.db.knowledge_models import DocumentChunkRecord, DocumentRecord, QARecord
 
 
+def _filename_keywords(filename: str) -> list[str]:
+    name = filename.replace(".pdf", "").replace(".docx", "").strip()
+    keywords: list[str] = []
+    for token in ("差旅", "报销", "管理办法", "实施细则", "办公"):
+        if token in name:
+            keywords.append(token)
+    if not keywords and len(name) >= 4:
+        keywords.append(name[:8])
+    return keywords
+
+
 class KnowledgeRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -38,6 +49,50 @@ class KnowledgeRepository:
             select(DocumentRecord).where(DocumentRecord.id == document_id)
         )
         return result.scalar_one_or_none()
+
+    async def find_document_for_source(
+        self, document_id: str | None, filename: str | None
+    ) -> DocumentRecord | None:
+        from pathlib import Path
+
+        if document_id:
+            doc = await self.get_document(document_id)
+            if doc and doc.status == "ready" and Path(doc.file_path).is_file():
+                return doc
+        if filename:
+            exact = await self.db.execute(
+                select(DocumentRecord).where(
+                    DocumentRecord.filename == filename,
+                    DocumentRecord.status == "ready",
+                )
+            )
+            doc = exact.scalar_one_or_none()
+            if doc and Path(doc.file_path).is_file():
+                return doc
+            for keyword in _filename_keywords(filename):
+                fuzzy = await self.db.execute(
+                    select(DocumentRecord)
+                    .where(
+                        DocumentRecord.status == "ready",
+                        DocumentRecord.file_type == "pdf",
+                        DocumentRecord.filename.contains(keyword),
+                    )
+                    .order_by(DocumentRecord.updated_at.desc())
+                    .limit(1)
+                )
+                doc = fuzzy.scalar_one_or_none()
+                if doc and Path(doc.file_path).is_file():
+                    return doc
+        fallback = await self.db.execute(
+            select(DocumentRecord)
+            .where(DocumentRecord.status == "ready", DocumentRecord.file_type == "pdf")
+            .order_by(DocumentRecord.updated_at.desc())
+            .limit(1)
+        )
+        doc = fallback.scalar_one_or_none()
+        if doc and Path(doc.file_path).is_file():
+            return doc
+        return None
 
     async def document_exists(self, document_id: str) -> bool:
         result = await self.db.execute(

@@ -21,10 +21,22 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      path: '/tasks',
+      name: 'my-tasks',
+      component: () => import('@/pages/MyTasksPage.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       path: '/help/knowledge',
       name: 'knowledge-help',
       component: () => import('@/pages/KnowledgeHelpPage.vue'),
       meta: { requiresAuth: true },
+    },
+    {
+      path: '/oa/travel/:taskId',
+      name: 'oa-travel-apply',
+      component: () => import('@/pages/OaTravelApplyPage.vue'),
+      meta: { requiresAuth: true, standalone: true },
     },
     {
       path: '/settings',
@@ -74,6 +86,11 @@ const router = createRouter({
           path: 'settings',
           name: 'admin-settings',
           component: () => import('@/pages/admin/SystemSettingsPage.vue'),
+        },
+        {
+          path: 'project-mapping',
+          name: 'admin-project-mapping',
+          component: () => import('@/pages/admin/ProjectMappingPage.vue'),
         },
       ],
     },

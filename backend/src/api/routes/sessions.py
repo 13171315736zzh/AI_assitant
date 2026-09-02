@@ -8,16 +8,33 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.deps import get_current_user
 from src.api.responses import error, paginated, success
 from src.db.session import get_db
-from src.models.session import MessageCreate, SessionCreate, SessionUpdate
+from src.models.session import (
+    BookingSelectionConfirm,
+    MessageCreate,
+    RoomSelectionConfirm,
+    SessionCreate,
+    SessionUpdate,
+    PlanConfirm,
+    WorkpackageConfirm,
+    WorkpackagePlanConfirm,
+)
 from src.models.user import UserPublic
 from src.repositories.session import MessageRepository, SessionRepository
+from src.repositories.user import UserRepository
+from src.repositories.user_settings import UserSettingsRepository
 from src.services.session import SessionService
+from src.services.settings import SettingsService
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 
 def _service(db: AsyncSession) -> SessionService:
-    return SessionService(SessionRepository(db), MessageRepository(db))
+    user_repo = UserRepository(db)
+    return SessionService(
+        SessionRepository(db),
+        MessageRepository(db),
+        settings_service=SettingsService(UserSettingsRepository(db), user_repo),
+    )
 
 
 async def _sse_stream(user_id: int, session_id: str, content: str, db: AsyncSession):
@@ -82,6 +99,19 @@ async def update_session(
     return success(session.model_dump())
 
 
+@router.delete("/{session_id}")
+async def delete_session(
+    session_id: str,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    deleted = await svc.delete_session(current_user.id, session_id)
+    if not deleted:
+        return JSONResponse(status_code=404, content=error("会话不存在", code=404))
+    return success({"deleted": True})
+
+
 @router.get("/{session_id}/messages")
 async def list_messages(
     session_id: str,
@@ -114,11 +144,12 @@ async def send_message(
             status_code=400,
             content=error("会话已结束，无法发送新消息", code=400),
         )
-    user_message, assistant_message = result
+    user_message, assistant_message, session_title = result
     return success(
         {
             "user_message": user_message.model_dump(),
             "assistant_message": assistant_message.model_dump(),
+            "session_title": session_title,
         }
     )
 
@@ -134,4 +165,189 @@ async def stream_message(
         _sse_stream(current_user.id, session_id, content, db),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/{session_id}/booking-selection")
+async def confirm_booking_selection(
+    session_id: str,
+    body: BookingSelectionConfirm,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    result = await svc.confirm_booking_selection(
+        current_user.id,
+        session_id,
+        body.flight_no,
+        body.hotel_name,
+    )
+    if result is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法确认预订，请重新选择方案", code=400),
+        )
+    if result == "ended":
+        return JSONResponse(
+            status_code=400,
+            content=error("会话已结束，无法确认预订", code=400),
+        )
+    user_message, assistant_message, session_title = result
+    return success(
+        {
+            "user_message": user_message.model_dump(),
+            "assistant_message": assistant_message.model_dump(),
+            "session_title": session_title,
+        }
+    )
+
+
+@router.post("/{session_id}/travel-plan-confirm")
+async def confirm_travel_plan(
+    session_id: str,
+    body: PlanConfirm,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _ = body
+    svc = _service(db)
+    result = await svc.confirm_travel_plan(current_user.id, session_id)
+    if result is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法确认出差安排，请重试", code=400),
+        )
+    if result == "ended":
+        return JSONResponse(
+            status_code=400,
+            content=error("会话已结束，无法确认", code=400),
+        )
+    user_message, assistant_message, session_title = result
+    return success(
+        {
+            "user_message": user_message.model_dump(),
+            "assistant_message": assistant_message.model_dump(),
+            "session_title": session_title,
+        }
+    )
+
+
+@router.post("/{session_id}/meeting-plan-confirm")
+async def confirm_meeting_plan(
+    session_id: str,
+    body: PlanConfirm,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _ = body
+    svc = _service(db)
+    result = await svc.confirm_meeting_plan(current_user.id, session_id)
+    if result is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法确认会议预约，请重试", code=400),
+        )
+    if result == "ended":
+        return JSONResponse(
+            status_code=400,
+            content=error("会话已结束，无法确认", code=400),
+        )
+    user_message, assistant_message, session_title = result
+    return success(
+        {
+            "user_message": user_message.model_dump(),
+            "assistant_message": assistant_message.model_dump(),
+            "session_title": session_title,
+        }
+    )
+
+
+@router.post("/{session_id}/room-selection")
+async def confirm_room_selection(
+    session_id: str,
+    body: RoomSelectionConfirm,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    result = await svc.confirm_room_selection(current_user.id, session_id, body.room)
+    if result is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法确认会议室，请重新选择", code=400),
+        )
+    if result == "ended":
+        return JSONResponse(
+            status_code=400,
+            content=error("会话已结束，无法确认预约", code=400),
+        )
+    user_message, assistant_message, session_title = result
+    return success(
+        {
+            "user_message": user_message.model_dump(),
+            "assistant_message": assistant_message.model_dump(),
+            "session_title": session_title,
+        }
+    )
+
+
+@router.post("/{session_id}/workpackage-plan-confirm")
+async def confirm_workpackage_plan(
+    session_id: str,
+    body: WorkpackagePlanConfirm,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    result = await svc.confirm_workpackage_plan(
+        current_user.id, session_id, project=body.project
+    )
+    if result is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法确认工包填报信息，请重试", code=400),
+        )
+    if result == "ended":
+        return JSONResponse(
+            status_code=400,
+            content=error("会话已结束，无法确认", code=400),
+        )
+    user_message, assistant_message, session_title = result
+    return success(
+        {
+            "user_message": user_message.model_dump(),
+            "assistant_message": assistant_message.model_dump(),
+            "session_title": session_title,
+        }
+    )
+
+
+@router.post("/{session_id}/workpackage-confirm")
+async def confirm_workpackage(
+    session_id: str,
+    body: WorkpackageConfirm,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    result = await svc.confirm_workpackage(
+        current_user.id, session_id, entries=body.entries
+    )
+    if result is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法确认工包填报，请重试", code=400),
+        )
+    if result == "ended":
+        return JSONResponse(
+            status_code=400,
+            content=error("会话已结束，无法确认填报", code=400),
+        )
+    user_message, assistant_message, session_title = result
+    return success(
+        {
+            "user_message": user_message.model_dump(),
+            "assistant_message": assistant_message.model_dump(),
+            "session_title": session_title,
+        }
     )

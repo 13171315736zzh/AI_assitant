@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { useAuthStore } from '@/stores/useAuthStore'
 import { useChatStore } from '@/stores/useChatStore'
 import SessionSidebar from '@/components/chat/SessionSidebar.vue'
 import ChatTopbar from '@/components/chat/ChatTopbar.vue'
@@ -9,17 +11,42 @@ import TicketModal from '@/components/chat/TicketModal.vue'
 import TaskDetailPanel from '@/components/chat/TaskDetailPanel.vue'
 import DocumentPreviewModal from '@/components/chat/DocumentPreviewModal.vue'
 import BusinessFormPanel from '@/components/chat/BusinessFormPanel.vue'
-import type { MessageSource } from '@/types'
+import ConfirmDialog from '@/components/chat/ConfirmDialog.vue'
+import type { MessageSource, Session } from '@/types'
 
 const chat = useChatStore()
+const auth = useAuthStore()
+const route = useRoute()
+const router = useRouter()
 const showTicket = ref(false)
 const activeTaskId = ref<string | null>(null)
 const activeFormId = ref<string | null>(null)
 const previewSource = ref<MessageSource | null>(null)
+const deleteTarget = ref<Session | null>(null)
+const deleting = ref(false)
 
-onMounted(() => {
-  chat.loadSessions()
+onMounted(async () => {
+  await chat.loadSessions()
+  const sessionQuery = route.query.session
+  const taskQuery = route.query.task
+  if (typeof sessionQuery === 'string' && sessionQuery) {
+    await chat.loadMessages(sessionQuery)
+    if (typeof taskQuery === 'string' && taskQuery) {
+      activeTaskId.value = taskQuery
+    }
+    router.replace({ name: 'chat' })
+  }
 })
+
+watch(
+  () => auth.user?.id,
+  (userId, prevId) => {
+    if (userId && userId !== prevId) {
+      chat.reset()
+      chat.loadSessions()
+    }
+  },
+)
 
 async function handleEndSession() {
   if (!chat.activeSession || chat.activeSession.status === 'ended') {
@@ -34,6 +61,28 @@ async function handleEndSession() {
 async function handleClearMemory() {
   if (confirm('确认清除所有长期记忆？此操作不可撤销。')) {
     await chat.clearUserMemory()
+  }
+}
+
+function requestDeleteSession(sessionId: string) {
+  deleteTarget.value = chat.sessions.find((s) => s.id === sessionId) ?? null
+}
+
+function cancelDeleteSession() {
+  deleteTarget.value = null
+}
+
+async function confirmDeleteSession() {
+  if (!deleteTarget.value || deleting.value) return
+  deleting.value = true
+  try {
+    await chat.removeSession(deleteTarget.value.id)
+    deleteTarget.value = null
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : '删除失败，请稍后重试'
+    alert(message)
+  } finally {
+    deleting.value = false
   }
 }
 
@@ -64,9 +113,11 @@ function openSource(source: MessageSource) {
       :sessions="chat.sessions"
       :active-id="chat.activeSessionId"
       :loading="chat.loading"
+      :deleting-session-id="chat.deletingSessionId"
       @select="chat.loadMessages"
       @new-session="chat.newSession"
       @end-session="handleEndSession"
+      @delete-session="requestDeleteSession"
     />
 
     <section class="main">
@@ -76,9 +127,18 @@ function openSource(source: MessageSource) {
       />
 
       <MessageList
-        :messages="chat.messages"
+        :messages="chat.displayMessages"
+        :workflow-submitting="chat.workflowSubmitting"
+        :quick-actions-disabled="chat.isActiveSessionEnded || chat.sending"
         @open-task="openTask"
         @open-source="openSource"
+        @confirm-booking="chat.confirmBooking"
+        @confirm-room="chat.confirmRoom"
+        @confirm-workpackage="chat.confirmWorkpackage"
+        @confirm-workpackage-plan="chat.confirmWorkpackagePlan"
+        @confirm-travel-plan="chat.confirmTravelPlan"
+        @confirm-meeting-plan="chat.confirmMeetingPlan"
+        @quick-start="chat.send"
       />
 
       <ChatInput
@@ -110,6 +170,18 @@ function openSource(source: MessageSource) {
     <DocumentPreviewModal
       :source="previewSource"
       @close="previewSource = null"
+    />
+
+    <ConfirmDialog
+      v-if="deleteTarget"
+      title="删除对话"
+      :message="`确定要永久删除「${deleteTarget.title}」吗？删除后对话记录将无法恢复。`"
+      confirm-text="确定删除"
+      cancel-text="取消"
+      danger
+      :loading="deleting"
+      @confirm="confirmDeleteSession"
+      @cancel="cancelDeleteSession"
     />
   </div>
 </template>

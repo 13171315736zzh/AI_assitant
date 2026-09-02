@@ -34,7 +34,7 @@ function onKeydown(e: KeyboardEvent) {
         v-model="text"
         rows="1"
         :disabled="disabled || sending"
-        placeholder="输入办公指令，如：帮我写邮件…"
+        placeholder="输入您的需求，或直接说…"
         @keydown="onKeydown"
       />
       <button

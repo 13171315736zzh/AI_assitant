@@ -57,6 +57,7 @@ async def extract_document_text_async(
     file_path: Path,
     file_type: str,
     on_ocr_start=None,
+    on_ocr_page=None,
 ) -> str:
     text = extract_document_text(file_path, file_type)
     if text.strip() or file_type != "pdf":
@@ -66,7 +67,7 @@ async def extract_document_text_async(
     logger.info("PDF has no text layer, trying vision OCR", path=str(file_path))
     if on_ocr_start:
         await on_ocr_start()
-    return await ocr_pdf_to_text(file_path)
+    return await ocr_pdf_to_text(file_path, on_page_done=on_ocr_page)
 
 
 def split_text(text: str, chunk_size: int = 400) -> list[str]:

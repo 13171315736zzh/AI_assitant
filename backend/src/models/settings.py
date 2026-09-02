@@ -66,3 +66,7 @@ class VersionCheckPublic(BaseModel):
 
 class ClearMemoryPublic(BaseModel):
     cleared: bool
+
+
+class WelcomePublic(BaseModel):
+    welcome_message: str

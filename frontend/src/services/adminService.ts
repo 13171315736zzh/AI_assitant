@@ -251,3 +251,84 @@ function delay(ms: number) {
 }
 
 export type { AdminDocument, AdminQA, AdminConversation, AdminConversationDetail, ConversationStats, SystemConfig }
+
+export interface ProjectMapping {
+  id: string
+  project_name: string
+  aliases: string
+  city: string
+  district: string
+  address: string
+  policy_city: string
+  remark: string
+  updated_by: string
+  updated_at: string
+}
+
+export async function fetchProjectMappings(
+  keyword?: string,
+): Promise<ApiResponse<PaginatedData<ProjectMapping>>> {
+  const { data } = await api.get('/admin/project-mappings', { params: { keyword, page_size: 200 } })
+  return data
+}
+
+export async function deleteProjectMapping(id: string): Promise<ApiResponse<{ deleted: boolean }>> {
+  const { data } = await api.delete(`/admin/project-mappings/${id}`)
+  return data
+}
+
+export type ProjectMappingUpdatePayload = Partial<
+  Pick<ProjectMapping, 'project_name' | 'aliases' | 'city' | 'district' | 'address' | 'policy_city' | 'remark'>
+>
+
+export type ProjectMappingCreatePayload = Pick<
+  ProjectMapping,
+  'project_name' | 'aliases' | 'city' | 'district' | 'address' | 'policy_city' | 'remark'
+>
+
+export async function createProjectMapping(
+  payload: ProjectMappingCreatePayload,
+): Promise<ApiResponse<ProjectMapping>> {
+  const { data } = await api.post('/admin/project-mappings', payload)
+  return data
+}
+
+export async function updateProjectMapping(
+  id: string,
+  payload: ProjectMappingUpdatePayload,
+): Promise<ApiResponse<ProjectMapping>> {
+  const { data } = await api.put(`/admin/project-mappings/${id}`, payload)
+  return data
+}
+
+export async function importProjectMappings(
+  file: File,
+  replace = false,
+): Promise<
+  ApiResponse<{ imported: number; updated: number; skipped: number; errors: string[] }>
+> {
+  const form = new FormData()
+  form.append('file', file)
+  const { data } = await api.post(`/admin/project-mappings/import?replace=${replace}`, form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return data
+}
+
+async function downloadProjectMappingBlob(path: string, filename: string) {
+  const { data } = await api.get(path, { responseType: 'blob' })
+  const url = URL.createObjectURL(data)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+export async function downloadProjectMappingTemplate() {
+  await downloadProjectMappingBlob('/admin/project-mappings/template', 'project_mapping_template.xlsx')
+}
+
+export async function downloadProjectMappingExport() {
+  await downloadProjectMappingBlob('/admin/project-mappings/export', 'project_mapping_export.xlsx')
+}

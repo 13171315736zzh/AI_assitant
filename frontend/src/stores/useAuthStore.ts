@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type { User } from '@/types'
 import { login as loginApi, logout as logoutApi, fetchMe } from '@/services/authService'
+import { useChatStore } from './useChatStore'
 
 export const useAuthStore = defineStore('auth', () => {
   const token = ref<string | null>(localStorage.getItem('token'))
@@ -23,10 +24,14 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function persistAuth(accessToken: string, userData: User) {
+    const prevId = user.value?.id
     token.value = accessToken
     user.value = userData
     localStorage.setItem('token', accessToken)
     localStorage.setItem('user', JSON.stringify(userData))
+    if (prevId != null && prevId !== userData.id) {
+      useChatStore().reset()
+    }
   }
 
   function clearAuth() {
@@ -34,6 +39,7 @@ export const useAuthStore = defineStore('auth', () => {
     user.value = null
     localStorage.removeItem('token')
     localStorage.removeItem('user')
+    useChatStore().reset()
   }
 
   async function login(username: string, password: string) {

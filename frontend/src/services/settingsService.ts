@@ -18,8 +18,18 @@ import {
   mockUpdateTheme,
 } from '@/mocks/settings'
 import api, { isMockMode } from './api'
+import { DEFAULT_WELCOME_TEXT } from '@/constants/welcomeQuickActions'
 
-export type { MemoryItem, MemorySettings, ProfileSettings, ThemeValue, VersionCheckResult, VersionInfo }
+const DEFAULT_WELCOME = DEFAULT_WELCOME_TEXT
+
+export async function fetchWelcomeMessage(): Promise<ApiResponse<{ welcome_message: string }>> {
+  if (isMockMode('settings')) {
+    await delay(100)
+    return { code: 200, message: 'success', data: { welcome_message: DEFAULT_WELCOME } }
+  }
+  const { data } = await api.get<ApiResponse<{ welcome_message: string }>>('/settings/welcome')
+  return data
+}
 
 export async function fetchProfile(): Promise<ApiResponse<ProfileSettings>> {
   if (isMockMode('settings')) {

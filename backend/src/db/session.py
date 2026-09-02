@@ -14,7 +14,7 @@ from src.db.task_models import TaskRecord  # noqa: F401
 from src.db.user_model import User  # noqa: F401
 from src.db.user_settings_models import UserSettingsRecord  # noqa: F401
 from src.db.system_config_models import SystemConfigRecord  # noqa: F401
-from src.db.ticket_models import TicketRecord  # noqa: F401
+from src.db.project_mapping_models import ProjectMappingRecord  # noqa: F401
 
 _engine = None
 _async_session_factory: async_sessionmaker[AsyncSession] | None = None
@@ -34,7 +34,11 @@ def _get_engine():
     if _engine is None:
         settings = get_settings()
         _ensure_sqlite_dir(settings.database_url)
-        _engine = create_async_engine(settings.database_url, echo=settings.debug)
+        _engine = create_async_engine(
+            settings.database_url,
+            echo=settings.debug,
+            connect_args={"timeout": 30},
+        )
         _async_session_factory = async_sessionmaker(
             _engine, class_=AsyncSession, expire_on_commit=False
         )
@@ -44,6 +48,9 @@ def _get_engine():
 async def init_db() -> None:
     engine = _get_engine()
     async with engine.begin() as conn:
+        if str(engine.url).startswith("sqlite"):
+            await conn.execute(text("PRAGMA journal_mode=WAL"))
+            await conn.execute(text("PRAGMA busy_timeout=30000"))
         await conn.run_sync(Base.metadata.create_all)
         # SQLite 无自动迁移：tasks 表结构变更时重建
         result = await conn.execute(text("PRAGMA table_info(tasks)"))
