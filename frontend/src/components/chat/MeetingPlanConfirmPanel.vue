@@ -81,7 +81,7 @@ const effectiveRoom = computed(() => {
 const confirmLabel = computed(() => {
   if (props.confirm.confirm_label) return props.confirm.confirm_label
   if (planMode.value === 'gn_only') return '确认并开始国能会议预约'
-  if (planMode.value === 'combined') return '确认并办理（国能会 + 会议室）'
+  if (planMode.value === 'combined') return '确认并办理（国能会议 + 会议室）'
   if (roomFlexible.value && !effectiveRoom.value) {
     return '确认并选择会议室'
   }
@@ -248,7 +248,7 @@ function handleConfirm() {
       <div v-else-if="planMode === 'gn_only'" class="field-row">
         <span class="field-key">会议形式</span>
         <div class="field-col">
-          <span class="editable-display static">国能会（线上/视频）</span>
+          <span class="editable-display static">国能会议（线上/视频）</span>
         </div>
       </div>
 

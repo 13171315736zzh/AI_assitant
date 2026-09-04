@@ -52,6 +52,36 @@ class SessionService:
         self.agent_service = agent_service or AgentService(message_repo)
         self.settings_service = settings_service
 
+    async def _sync_workflow_task_links(
+        self, session_id: str, metadata: dict | None
+    ) -> None:
+        if not isinstance(metadata, dict):
+            return
+        if not metadata.get("workflow_plan") and not metadata.get("task_id"):
+            return
+        from src.agent.workflow_plan import link_tasks_from_assistant_metadata
+
+        await link_tasks_from_assistant_metadata(
+            self.message_repo, session_id, metadata
+        )
+
+    async def _create_assistant_message(
+        self,
+        session_id: str,
+        content: str,
+        message_type: str,
+        metadata: dict | None = None,
+    ):
+        assistant_msg = await self.message_repo.create(
+            session_id,
+            "assistant",
+            content,
+            message_type,
+            metadata=metadata,
+        )
+        await self._sync_workflow_task_links(session_id, metadata)
+        return assistant_msg
+
     async def list_sessions(
         self, user_id: int, status: str | None, page: int, page_size: int
     ) -> tuple[list[SessionPublic], int]:
@@ -201,9 +231,8 @@ class SessionService:
             travel_staff_level,
         )
         user_msg = await self.message_repo.create(session_id, "user", content, "text")
-        assistant_msg = await self.message_repo.create(
+        assistant_msg = await self._create_assistant_message(
             session_id,
-            "assistant",
             reply_content,
             message_type,
             metadata=metadata,
@@ -254,9 +283,8 @@ class SessionService:
             travel_staff_level,
             card_draft=card_draft,
         )
-        assistant_msg = await self.message_repo.create(
+        assistant_msg = await self._create_assistant_message(
             session_id,
-            "assistant",
             reply_content,
             message_type,
             metadata=metadata,
@@ -314,9 +342,8 @@ class SessionService:
             confirmed_position,
         )
         user_msg = await self.message_repo.create(session_id, "user", user_content, "text")
-        assistant_msg = await self.message_repo.create(
+        assistant_msg = await self._create_assistant_message(
             session_id,
-            "assistant",
             reply_content,
             message_type,
             metadata=metadata,
@@ -362,9 +389,8 @@ class SessionService:
             confirmed_position,
         )
         user_msg = await self.message_repo.create(session_id, "user", user_content, "text")
-        assistant_msg = await self.message_repo.create(
+        assistant_msg = await self._create_assistant_message(
             session_id,
-            "assistant",
             reply_content,
             message_type,
             metadata=metadata,
@@ -421,9 +447,8 @@ class SessionService:
             confirmed_position,
         )
         user_msg = await self.message_repo.create(session_id, "user", user_content, "text")
-        assistant_msg = await self.message_repo.create(
+        assistant_msg = await self._create_assistant_message(
             session_id,
-            "assistant",
             reply_content,
             message_type,
             metadata=metadata,
@@ -470,9 +495,8 @@ class SessionService:
             confirmed_position,
         )
         user_msg = await self.message_repo.create(session_id, "user", user_content, "text")
-        assistant_msg = await self.message_repo.create(
+        assistant_msg = await self._create_assistant_message(
             session_id,
-            "assistant",
             reply_content,
             message_type,
             metadata=metadata,
@@ -522,9 +546,8 @@ class SessionService:
             confirmed_position,
         )
         user_msg = await self.message_repo.create(session_id, "user", user_content, "text")
-        assistant_msg = await self.message_repo.create(
+        assistant_msg = await self._create_assistant_message(
             session_id,
-            "assistant",
             reply_content,
             message_type,
             metadata=metadata,
@@ -575,9 +598,8 @@ class SessionService:
             confirmed_position,
         )
         user_msg = await self.message_repo.create(session_id, "user", user_content, "text")
-        assistant_msg = await self.message_repo.create(
+        assistant_msg = await self._create_assistant_message(
             session_id,
-            "assistant",
             reply_content,
             message_type,
             metadata=metadata,
@@ -642,9 +664,8 @@ class SessionService:
             confirmed_position,
         )
         user_msg = await self.message_repo.create(session_id, "user", user_content, "text")
-        assistant_msg = await self.message_repo.create(
+        assistant_msg = await self._create_assistant_message(
             session_id,
-            "assistant",
             reply_content,
             message_type,
             metadata=metadata,
@@ -698,9 +719,8 @@ class SessionService:
             confirmed_position,
         )
         user_msg = await self.message_repo.create(session_id, "user", user_content, "text")
-        assistant_msg = await self.message_repo.create(
+        assistant_msg = await self._create_assistant_message(
             session_id,
-            "assistant",
             reply_content,
             message_type,
             metadata=metadata,

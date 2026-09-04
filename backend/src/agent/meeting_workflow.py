@@ -401,7 +401,7 @@ def _plan_item(label: str, value: str | None) -> dict[str, str]:
 
 def _room_display(plan: MeetingPlan) -> str:
     if plan.needs_gn_meeting and not plan.needs_room_booking:
-        return "国能会（线上）"
+        return "国能会议（线上）"
     if plan.room:
         return f"{plan.room} 会议室"
     if plan.room_flexible:
@@ -449,7 +449,7 @@ def build_meeting_plan_confirm_items(plan: MeetingPlan) -> list[dict[str, str]]:
     if plan.needs_room_booking:
         items.append({"label": "会议室", "value": _room_display(plan)})
     elif plan.needs_gn_meeting:
-        items.append({"label": "会议形式", "value": "国能会（线上）"})
+        items.append({"label": "会议形式", "value": "国能会议（线上）"})
     items.extend(
         [
             {"label": "时间", "value": _time_display(plan)},
@@ -515,7 +515,7 @@ def build_meeting_plan_confirm_metadata(plan: MeetingPlan) -> dict:
     time_options = build_meeting_time_options(plan)
     confirm_label = "确认开始办理"
     if mode == "combined":
-        confirm_label = "确认并办理（国能会 + 会议室）"
+        confirm_label = "确认并办理（国能会议 + 会议室）"
     elif mode == "gn_only":
         confirm_label = "确认并开始国能会议预约"
     elif plan.room_flexible:
@@ -634,7 +634,7 @@ def build_gn_execution_summary(plan: MeetingPlan, task_id: str, time_label: str)
             "一、会议信息",
             f"- 主题：{plan.subject or '国能会议'}",
             f"- 时间：{time_label}",
-            f"- 形式：**国能会（线上/视频）**",
+            f"- 形式：**国能会议（线上/视频）**",
             "",
             "二、后续步骤",
             "- 请在任务卡片中点击「确认继续」，跳转 OA 提交审批",

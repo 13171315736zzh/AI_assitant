@@ -24,7 +24,7 @@ from src.agent.workflow_queue import split_intent_segments
 _PLAN_META_KEY = "workflow_plan"
 
 _NODE_DEFS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
-    ("gn_meeting", "国能会", re.compile(r"国能会|线上会议|视频会议")),
+    ("gn_meeting", "国能会议", re.compile(r"国能会|国能会议|线上会议|视频会议")),
     ("email", "写邮件", re.compile(r"邮件|发信|发邮件|写信|email", re.I)),
     ("room", "会议室", re.compile(r"会议室|预约.*会议|订.*会议|预订会议|约.{0,12}会议|约.{0,8}会|帮我约")),
     ("travel", "差旅单", re.compile(r"出差|差旅(?:申请)?|驻场|办公地点")),
@@ -44,12 +44,13 @@ _TASK_CATEGORY_TO_NODE: dict[str, str] = {
     "leave": "leave",
     "info_collect": "info_collect",
     "meeting": "room",
+    "gn_meeting": "gn_meeting",
     "travel": "travel",
     "email": "email",
 }
 
 _NODE_GUIDANCE: dict[str, str] = {
-    "gn_meeting": "请说明国能会主题、会议时间与参会人员，例如：「明天下午2点开项目评审国能会，参会张明和李经理」。",
+    "gn_meeting": "请说明国能会议主题、会议时间与参会人员，例如：「明天下午2点开项目评审国能会议，参会张明和李经理」。",
     "email": "请说明邮件收件人、主题和主要通知内容，例如：「发邮件给张经理，主题出差安排确认」。",
     "room": "请说明会议时间与设备要求，例如：「今晚7点开会，有投屏的会议室哪个都行」。",
     "travel": "请说明目的地、出差日期和事由，例如：「下周三去鄂尔多斯出差2天，现场培训」。",
@@ -185,6 +186,12 @@ def _advance_active_node(plan: dict[str, Any]) -> None:
     nodes = plan.get("nodes")
     if not isinstance(nodes, list):
         return
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        if node.get("status") in ("running", "submitted") and node.get("task_id"):
+            plan["active_node_id"] = node.get("id")
+            return
     next_node = next(
         (node for node in nodes if isinstance(node, dict) and node.get("status") == "pending"),
         None,
@@ -194,6 +201,71 @@ def _advance_active_node(plan: dict[str, Any]) -> None:
         return
     next_node["status"] = "running"
     plan["active_node_id"] = next_node.get("id")
+
+
+def _ensure_valid_active_node(plan: dict[str, Any]) -> None:
+    active_id = plan.get("active_node_id")
+    if not active_id:
+        return
+    node = _node_by_id(plan, active_id)
+    if node and node.get("status") == "completed":
+        _advance_active_node(plan)
+
+
+def _node_id_for_task_meta(task_meta: dict[str, Any]) -> str | None:
+    kind = task_meta.get("meeting_kind")
+    if kind == "gn":
+        return "gn_meeting"
+    if kind == "room":
+        return "room"
+    category = str(task_meta.get("category") or "")
+    if category in _TASK_CATEGORY_TO_NODE:
+        return _TASK_CATEGORY_TO_NODE[category]
+    steps_desc = str(task_meta.get("steps_desc") or "")
+    if "国能会议" in steps_desc or "国能会" in steps_desc:
+        return "gn_meeting"
+    if "会议室" in steps_desc or "会议预约" in steps_desc:
+        return "room"
+    if "工时" in steps_desc:
+        return "workpackage"
+    if "请假" in steps_desc:
+        return "leave"
+    if "差旅" in steps_desc:
+        return "travel"
+    return None
+
+
+async def link_tasks_from_assistant_metadata(
+    message_repo,
+    session_id: str,
+    metadata: dict[str, Any],
+) -> None:
+    """任务创建早于 workflow_plan 落库时，在助手消息写入后补关联 task_id。"""
+    plan = await get_workflow_plan_from_session(message_repo, session_id)
+    if plan is None:
+        return
+
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    root_tid = metadata.get("task_id")
+    if root_tid:
+        candidates.append((str(root_tid), metadata))
+    related = metadata.get("related_tasks")
+    if isinstance(related, list):
+        for item in related:
+            if isinstance(item, dict) and item.get("task_id"):
+                tid = str(item["task_id"])
+                if not any(tid == existing for existing, _ in candidates):
+                    candidates.append((tid, item))
+
+    for task_id, task_meta in candidates:
+        node_id = _node_id_for_task_meta(task_meta)
+        if node_id and _node_by_id(plan, node_id) is not None:
+            await link_task_to_plan(
+                message_repo,
+                session_id,
+                task_id,
+                node_id=node_id,
+            )
 
 
 async def link_task_to_plan(
@@ -240,7 +312,11 @@ async def update_plan_for_task(
     session_id: str,
     task_id: str,
     status: str,
+    *,
+    task_steps: list[dict] | None = None,
 ) -> dict[str, Any] | None:
+    from src.agent.task_catalog import infer_category
+
     plan = await get_workflow_plan_from_session(message_repo, session_id)
     if plan is None:
         return None
@@ -257,6 +333,16 @@ async def update_plan_for_task(
         if node.get("task_id") == task_id:
             matched.append(node)
 
+    if not matched and task_steps:
+        category = infer_category(task_steps)
+        node_id = _TASK_CATEGORY_TO_NODE.get(category)
+        if node_id:
+            node = _node_by_id(plan, node_id)
+            if node is not None:
+                node["task_id"] = task_id
+                matched = [node]
+                changed = True
+
     if not matched:
         return plan
 
@@ -267,10 +353,18 @@ async def update_plan_for_task(
         changed = True
 
     if status == "completed":
-        for node in matched:
-            if plan.get("active_node_id") == node.get("id"):
+        prev_active = plan.get("active_node_id")
+        matched_active = any(
+            plan.get("active_node_id") == node.get("id") for node in matched
+        )
+        if matched_active:
+            _advance_active_node(plan)
+        else:
+            active = _node_by_id(plan, plan.get("active_node_id") or "")
+            if active and active.get("status") == "completed":
                 _advance_active_node(plan)
-                break
+        if plan.get("active_node_id") != prev_active:
+            changed = True
 
     if changed:
         await _persist_workflow_plan(message_repo, session_id, plan)
@@ -310,9 +404,9 @@ def _missing_slots_for_node(node_id: str, user_messages) -> list[str]:
             if not plan.subject:
                 if "会议主题" not in missing:
                     missing.insert(0, "会议主题")
-            if not re.search(r"国能会|线上|视频", combined) and "国能会时间" not in missing:
+            if not re.search(r"国能会|国能会议|线上|视频", combined) and "国能会议时间" not in missing:
                 if not has_meeting_schedule(plan):
-                    missing.append("国能会时间")
+                    missing.append("国能会议时间")
             if not plan.attendees and "参会人员" not in missing:
                 missing.append("参会人员")
         return missing
@@ -364,6 +458,8 @@ async def build_next_node_guidance(
     session_id: str,
     plan: dict[str, Any],
 ) -> tuple[str, dict[str, Any] | None]:
+    _ensure_valid_active_node(plan)
+    await _persist_workflow_plan(message_repo, session_id, plan)
     active_id = plan.get("active_node_id")
     nodes = plan.get("nodes")
     if not active_id or not isinstance(nodes, list):

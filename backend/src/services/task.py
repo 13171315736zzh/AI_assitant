@@ -351,7 +351,7 @@ class TaskService:
             current_step=confirm_step["step_id"] if confirm_step else record.current_step,
         )
         await update_plan_for_task(
-            self.message_repo, updated.session_id, task_id, "submitted"
+            self.message_repo, updated.session_id, task_id, "submitted", task_steps=steps
         )
         return OaTaskActionPublic(
             task=_to_task_public(updated),
@@ -427,7 +427,7 @@ class TaskService:
             await self.message_repo.update(task_message, metadata_json=meta)
 
         updated_plan = await update_plan_for_task(
-            self.message_repo, updated.session_id, task_id, "completed"
+            self.message_repo, updated.session_id, task_id, "completed", task_steps=steps
         )
 
         if updated_plan:
