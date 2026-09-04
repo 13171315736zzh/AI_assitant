@@ -33,3 +33,13 @@ def mark_meta_confirmed(message_record, key: str) -> None:
     item["status"] = "confirmed"
     meta[key] = item
     message_record.metadata_json = meta
+
+
+def mark_meta_superseded(message_record, key: str) -> None:
+    meta = dict(message_record.metadata_json or {})
+    item = dict(meta.get(key) or {})
+    if item.get("status") != "pending":
+        return
+    item["status"] = "superseded"
+    meta[key] = item
+    message_record.metadata_json = meta

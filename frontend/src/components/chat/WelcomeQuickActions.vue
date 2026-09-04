@@ -39,7 +39,7 @@ const emit = defineEmits<{
 <style scoped>
 .welcome-panel {
   width: 100%;
-  max-width: 440px;
+  max-width: 560px;
   padding: 16px 18px;
   border-radius: 14px;
   border: 1px solid var(--border);
@@ -77,7 +77,7 @@ const emit = defineEmits<{
 
 .quick-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -87,8 +87,8 @@ const emit = defineEmits<{
   align-items: center;
   justify-content: center;
   gap: 4px;
-  min-height: 58px;
-  padding: 8px 6px;
+  min-height: 56px;
+  padding: 8px 4px;
   border: 1px solid #e8ecf1;
   border-radius: 10px;
   background: #fff;
@@ -117,10 +117,12 @@ const emit = defineEmits<{
 }
 
 .chip-label {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text-secondary);
   font-weight: 500;
   white-space: nowrap;
+  text-align: center;
+  line-height: 1.2;
 }
 
 .welcome-hint {
@@ -130,7 +132,7 @@ const emit = defineEmits<{
   text-align: center;
 }
 
-@media (max-width: 520px) {
+@media (max-width: 560px) {
   .quick-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

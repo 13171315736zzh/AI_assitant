@@ -1,4 +1,4 @@
-export type FormType = 'email' | 'meeting' | 'travel' | 'workpackage'
+export type FormType = 'email' | 'meeting' | 'travel' | 'workpackage' | 'leave' | 'info_collect'
 export type FormStatus = 'preview' | 'confirmed' | 'submitted' | 'receipt'
 
 export interface FormData {
@@ -50,6 +50,16 @@ export const formFieldLabels: Record<string, Record<string, string>> = {
     content: '工作内容',
     period: '填报周期',
   },
+  leave: {
+    leave_type: '请假类型',
+    date_start: '开始日期',
+    date_end: '结束日期',
+    start_period: '开始时段',
+    end_period: '结束时段',
+    reason: '请假事由',
+    days: '请假天数',
+    attachment_name: '附件',
+  },
   meeting: {
     subject: '会议主题',
     start_time: '开始时间',
@@ -62,6 +72,13 @@ export const formFieldLabels: Record<string, Record<string, string>> = {
     cc: '抄送',
     subject: '主题',
     body: '正文',
+  },
+  info_collect: {
+    topic: '收集主题',
+    target: '收集对象',
+    fields: '需收集字段',
+    deadline: '截止时间',
+    description: '说明',
   },
 }
 
@@ -112,6 +129,22 @@ export function mockPreviewForm(formType: FormType): FormData {
         period: '2026-W12',
       },
     },
+    leave: {
+      form_id: id,
+      form_type: 'leave',
+      status: 'preview',
+      title: '请假申请',
+      fields: {
+        leave_type: '病假',
+        date_start: '2026-09-05',
+        date_end: '2026-09-05',
+        start_period: '全天',
+        end_period: '全天',
+        reason: '身体不适需休息',
+        days: '1',
+        attachment_name: '',
+      },
+    },
     meeting: {
       form_id: id,
       form_type: 'meeting',
@@ -135,6 +168,19 @@ export function mockPreviewForm(formType: FormType): FormData {
         cc: '',
         subject: '神东项目出差安排确认',
         body: '赵士廷经理，您好！\n\n烦请知悉，我计划于下周三前往神东项目现场…\n\n此致\n敬礼',
+      },
+    },
+    info_collect: {
+      form_id: id,
+      form_type: 'info_collect',
+      status: 'preview',
+      title: '信息收集',
+      fields: {
+        topic: '神东项目团队信息收集',
+        target: '神东项目团队',
+        fields: '姓名、工号、联系电话、邮箱',
+        deadline: '2026-09-10',
+        description: '请各成员如实填写联系方式，便于项目协调',
       },
     },
   }

@@ -29,6 +29,19 @@ _FORM_TEMPLATES: dict[str, tuple[str, dict[str, str]]] = {
             "period": "2026-W12",
         },
     ),
+    "leave": (
+        "请假申请",
+        {
+            "leave_type": "事假",
+            "date_start": "2026-09-05",
+            "date_end": "2026-09-05",
+            "start_period": "全天",
+            "end_period": "全天",
+            "reason": "个人事务",
+            "days": "1",
+            "attachment_name": "",
+        },
+    ),
     "meeting": (
         "会议预约",
         {
@@ -36,6 +49,15 @@ _FORM_TEMPLATES: dict[str, tuple[str, dict[str, str]]] = {
             "start_time": "2026-03-26 14:00",
             "end_time": "2026-03-26 16:00",
             "room": "总部 A301",
+            "attendees": "张明、李经理、王芳",
+        },
+    ),
+    "gn_meeting": (
+        "国能会议预约",
+        {
+            "subject": "项目进度评审会",
+            "start_time": "2026-03-26 14:00",
+            "end_time": "2026-03-26 16:00",
             "attendees": "张明、李经理、王芳",
         },
     ),
@@ -48,13 +70,26 @@ _FORM_TEMPLATES: dict[str, tuple[str, dict[str, str]]] = {
             "body": "赵士廷经理，您好！\n\n烦请知悉，我计划于下周三前往神东项目现场…\n\n此致\n敬礼",
         },
     ),
+    "info_collect": (
+        "信息收集",
+        {
+            "topic": "神东项目团队信息收集",
+            "target": "神东项目团队",
+            "fields": "姓名、工号、联系电话、邮箱",
+            "deadline": "2026-09-10",
+            "description": "请各成员如实填写联系方式，便于项目协调",
+        },
+    ),
 }
 
 _SUBMIT_MESSAGES = {
     "travel": "差旅申请已进入审批流程",
     "workpackage": "工包填报已提交",
+    "leave": "请假申请已进入审批流程",
     "meeting": "会议预约已提交",
+    "gn_meeting": "国能会议预约已提交",
     "email": "邮件已发送",
+    "info_collect": "信息收集已发布",
 }
 
 

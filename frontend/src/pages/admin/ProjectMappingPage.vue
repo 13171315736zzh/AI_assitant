@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, type ComponentPublicInstance } from 'vue'
+import { nextTick, onMounted, ref, type ComponentPublicInstance } from 'vue'
 import type { ProjectMapping } from '@/services/adminService'
 import {
   createProjectMapping,
@@ -19,7 +19,6 @@ type EditableField =
   | 'city'
   | 'district'
   | 'address'
-  | 'policy_city'
   | 'remark'
 
 const EDITABLE_FIELDS: EditableField[] = [
@@ -28,7 +27,6 @@ const EDITABLE_FIELDS: EditableField[] = [
   'city',
   'district',
   'address',
-  'policy_city',
   'remark',
 ]
 
@@ -38,7 +36,6 @@ const FIELD_LABELS: Record<EditableField, string> = {
   city: '所在城市',
   district: '区县',
   address: '详细地址',
-  policy_city: '标准城市',
   remark: '备注',
 }
 
@@ -54,6 +51,14 @@ const editValue = ref('')
 const savingKey = ref<string | null>(null)
 const editInput = ref<HTMLInputElement | null>(null)
 const adding = ref(false)
+let blurCommitTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearBlurCommitTimer() {
+  if (blurCommitTimer) {
+    clearTimeout(blurCommitTimer)
+    blurCommitTimer = null
+  }
+}
 
 function isDraftRow(row: ProjectMapping) {
   return row.id.startsWith(DRAFT_ID_PREFIX)
@@ -199,24 +204,45 @@ async function persistDraftRow(row: ProjectMapping) {
 
 async function startEdit(row: ProjectMapping, field: EditableField) {
   if (savingKey.value) return
+  clearBlurCommitTimer()
+
+  if (editing.value?.id === row.id && editing.value.field === field) {
+    await nextTick()
+    focusEditInput(editInput.value)
+    return
+  }
+
   if (editing.value) {
     const prevRow = items.value.find((item) => item.id === editing.value!.id)
     if (prevRow) await commitEdit(prevRow)
     else cancelEdit()
   }
   if (savingKey.value) return
+
   editing.value = { id: row.id, field }
   editValue.value = row[field] ?? ''
+  await nextTick()
+  focusEditInput(editInput.value)
 }
 
 function focusEditInput(el: Element | ComponentPublicInstance | null) {
   if (!el || !(el instanceof HTMLInputElement)) return
   editInput.value = el
   el.focus()
-  el.select()
+  const len = el.value.length
+  el.setSelectionRange(len, len)
+}
+
+function scheduleCommitOnBlur(row: ProjectMapping) {
+  clearBlurCommitTimer()
+  blurCommitTimer = setTimeout(() => {
+    blurCommitTimer = null
+    void commitEdit(row)
+  }, 120)
 }
 
 function cancelEdit() {
+  clearBlurCommitTimer()
   if (editing.value) {
     const row = items.value.find((item) => item.id === editing.value!.id)
     if (
@@ -292,7 +318,11 @@ function handleEditKeydown(event: KeyboardEvent, row: ProjectMapping) {
 }
 
 function handleCellClick(row: ProjectMapping, field: EditableField) {
-  if (isEditing(row.id, field)) return
+  clearBlurCommitTimer()
+  if (isEditing(row.id, field)) {
+    void startEdit(row, field)
+    return
+  }
   void startEdit(row, field)
 }
 </script>
@@ -355,14 +385,13 @@ function handleCellClick(row: ProjectMapping, field: EditableField) {
             <th>所在城市</th>
             <th>区县</th>
             <th>详细地址</th>
-            <th>标准城市</th>
             <th>备注</th>
             <th>操作</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="!items.length">
-            <td colspan="8" class="empty">暂无数据，请下载模板填写后上传</td>
+            <td colspan="7" class="empty">暂无数据，请下载模板填写后上传</td>
           </tr>
           <tr v-for="row in items" :key="row.id" :class="{ 'draft-row': isDraftRow(row) }">
             <td
@@ -379,12 +408,13 @@ function handleCellClick(row: ProjectMapping, field: EditableField) {
             >
               <input
                 v-if="isEditing(row.id, field)"
-                :ref="focusEditInput"
+                ref="editInput"
                 v-model="editValue"
                 class="cell-input"
                 :placeholder="FIELD_LABELS[field]"
-                @blur="commitEdit(row)"
+                @blur="scheduleCommitOnBlur(row)"
                 @keydown="handleEditKeydown($event, row)"
+                @mousedown.stop
                 @click.stop
               />
               <span v-else class="cell-text">{{ displayValue(row[field]) }}</span>
@@ -409,7 +439,6 @@ function handleCellClick(row: ProjectMapping, field: EditableField) {
         <li><strong>项目名称</strong>：必填，如「燕宝能源」</li>
         <li><strong>项目别名</strong>：逗号分隔，如「雁宝,燕宝可视化二期」</li>
         <li><strong>所在城市 / 区县 / 详细地址</strong>：完整地点描述</li>
-        <li><strong>标准城市</strong>：差旅政策匹配用，如「海拉尔」</li>
       </ul>
     </section>
   </div>

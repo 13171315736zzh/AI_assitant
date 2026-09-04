@@ -1,6 +1,8 @@
 from src.models.session import MessagePublic, SessionPublic
 from src.repositories.session import MessageRepository, SessionRepository
 from src.services.agent import AgentService
+from src.services.leave_workflow import LeaveWorkflowService
+from src.services.info_collect_workflow import InfoCollectWorkflowService
 from src.services.meeting_workflow import MeetingWorkflowService
 from src.services.settings import SettingsService
 from src.services.travel_workflow import TravelWorkflowService
@@ -30,6 +32,11 @@ def _to_message_public(record) -> MessagePublic:
         metadata=record.metadata_json,
         created_at=record.created_at.isoformat(),
     )
+
+
+def _confirm_user_content(default: str, supplementary: str | None) -> str:
+    extra = (supplementary or "").strip()
+    return extra or default
 
 
 class SessionService:
@@ -127,8 +134,9 @@ class SessionService:
             )
             memory_snippets = await self.settings_service.build_agent_memory_snippets(user_id)
             confirmed_position = await self.settings_service.get_confirmed_position(user_id)
-            return memory_snippets, confirmed_position
-        return "", None
+            travel_staff_level = await self.settings_service.get_travel_staff_level(user_id)
+            return memory_snippets, confirmed_position, travel_staff_level
+        return "", None, "其他人员"
 
     async def _generate_reply(
         self,
@@ -137,15 +145,24 @@ class SessionService:
         content: str,
         memory_snippets: str,
         confirmed_position: str | None,
+        travel_staff_level: str = "其他人员",
+        *,
+        card_draft: dict | None = None,
     ) -> tuple[str, str, dict | None]:
         db = self.session_repo.db
         for workflow_svc, kwargs in (
             (MeetingWorkflowService(db), {}),
             (WorkpackageWorkflowService(db), {}),
-            (TravelWorkflowService(db), {"staff_level": confirmed_position}),
+            (LeaveWorkflowService(db), {}),
+            (InfoCollectWorkflowService(db), {}),
+            (TravelWorkflowService(db), {"staff_level": travel_staff_level}),
         ):
             workflow = await workflow_svc.try_execute(
-                user_id, session_id, content, **kwargs
+                user_id,
+                session_id,
+                content,
+                card_draft=card_draft,
+                **kwargs,
             )
             if workflow:
                 return await self.agent_service.finalize_outgoing(
@@ -172,7 +189,7 @@ class SessionService:
         if record == "ended":
             return "ended"
 
-        memory_snippets, confirmed_position = await self._prepare_agent_context(
+        memory_snippets, confirmed_position, travel_staff_level = await self._prepare_agent_context(
             user_id, session_id, content
         )
         reply_content, message_type, metadata = await self._generate_reply(
@@ -181,6 +198,7 @@ class SessionService:
             content,
             memory_snippets,
             confirmed_position,
+            travel_staff_level,
         )
         user_msg = await self.message_repo.create(session_id, "user", content, "text")
         assistant_msg = await self.message_repo.create(
@@ -200,7 +218,7 @@ class SessionService:
         )
 
     async def stream_reply(
-        self, user_id: int, session_id: str, content: str
+        self, user_id: int, session_id: str, content: str, *, card_draft: dict | None = None
     ):
         """Yields user → ack(s) → done（用户消息立即落库，承接语在正式回复前展示）。"""
         record = await self._prepare_send(user_id, session_id)
@@ -211,7 +229,7 @@ class SessionService:
             yield "error", {"code": 400, "message": "会话已结束，无法发送新消息"}
             return
 
-        memory_snippets, confirmed_position = await self._prepare_agent_context(
+        memory_snippets, confirmed_position, travel_staff_level = await self._prepare_agent_context(
             user_id, session_id, content
         )
 
@@ -221,7 +239,7 @@ class SessionService:
         await self.session_repo.db.commit()
         yield "user", {"user_message": _to_message_public(user_msg).model_dump()}
 
-        acks = await self.agent_service.generate_acks(content)
+        acks = await self.agent_service.generate_acks(session_id, content)
         for ack in acks:
             yield "ack", {"content": ack}
 
@@ -233,6 +251,8 @@ class SessionService:
             content,
             memory_snippets,
             confirmed_position,
+            travel_staff_level,
+            card_draft=card_draft,
         )
         assistant_msg = await self.message_repo.create(
             session_id,
@@ -264,17 +284,16 @@ class SessionService:
         if record == "ended":
             return "ended"
 
-        memory_snippets, confirmed_position = await self._prepare_agent_context(
+        _, confirmed_position, travel_staff_level = await self._prepare_agent_context(
             user_id, session_id, "确认预订方案"
         )
-        _ = memory_snippets
 
         workflow = await TravelWorkflowService(self.session_repo.db).confirm_booking_selection(
             user_id,
             session_id,
             flight_no=flight_no,
             hotel_name=hotel_name,
-            staff_level=confirmed_position,
+            staff_level=travel_staff_level,
         )
         if not workflow:
             return None
@@ -323,7 +342,7 @@ class SessionService:
         if record == "ended":
             return "ended"
 
-        _, confirmed_position = await self._prepare_agent_context(
+        _, confirmed_position, travel_staff_level = await self._prepare_agent_context(
             user_id, session_id, "确认会议室"
         )
 
@@ -365,6 +384,9 @@ class SessionService:
         session_id: str,
         *,
         project: str | None = None,
+        all_days_eight_hours: bool | None = None,
+        hours_per_day: float | None = None,
+        supplementary_content: str | None = None,
     ) -> tuple[MessagePublic, MessagePublic, str] | None | str:
         record = await self._prepare_send(user_id, session_id)
         if record is None:
@@ -372,17 +394,24 @@ class SessionService:
         if record == "ended":
             return "ended"
 
-        _, confirmed_position = await self._prepare_agent_context(
-            user_id, session_id, "确认工包填报信息"
+        user_content = _confirm_user_content("确认开始办理工包填报", supplementary_content)
+        _, confirmed_position, travel_staff_level = await self._prepare_agent_context(
+            user_id, session_id, user_content
         )
 
         workflow = await WorkpackageWorkflowService(
             self.session_repo.db
-        ).confirm_workpackage_plan(user_id, session_id, project=project)
+        ).confirm_workpackage_plan(
+            user_id,
+            session_id,
+            project=project,
+            all_days_eight_hours=all_days_eight_hours,
+            hours_per_day=hours_per_day,
+            supplementary_content=supplementary_content,
+        )
         if not workflow:
             return None
 
-        user_content = "确认开始办理工包填报"
         reply_content, message_type, metadata = await self.agent_service.finalize_outgoing(
             session_id,
             user_content,
@@ -421,7 +450,7 @@ class SessionService:
         if record == "ended":
             return "ended"
 
-        _, confirmed_position = await self._prepare_agent_context(
+        _, confirmed_position, travel_staff_level = await self._prepare_agent_context(
             user_id, session_id, "确认工包填报"
         )
 
@@ -461,6 +490,8 @@ class SessionService:
         self,
         user_id: int,
         session_id: str,
+        *,
+        supplementary_content: str | None = None,
     ) -> tuple[MessagePublic, MessagePublic, str] | None | str:
         record = await self._prepare_send(user_id, session_id)
         if record is None:
@@ -468,19 +499,20 @@ class SessionService:
         if record == "ended":
             return "ended"
 
-        _, confirmed_position = await self._prepare_agent_context(
-            user_id, session_id, "确认出差安排"
+        user_content = _confirm_user_content("确认开始办理出差安排", supplementary_content)
+        _, confirmed_position, travel_staff_level = await self._prepare_agent_context(
+            user_id, session_id, user_content
         )
 
         workflow = await TravelWorkflowService(self.session_repo.db).confirm_travel_plan(
             user_id,
             session_id,
-            staff_level=confirmed_position,
+            staff_level=travel_staff_level,
+            supplementary_content=supplementary_content,
         )
         if not workflow:
             return None
 
-        user_content = "确认开始办理出差安排"
         reply_content, message_type, metadata = await self.agent_service.finalize_outgoing(
             session_id,
             user_content,
@@ -510,6 +542,9 @@ class SessionService:
         self,
         user_id: int,
         session_id: str,
+        *,
+        supplementary_content: str | None = None,
+        card_draft: dict | None = None,
     ) -> tuple[MessagePublic, MessagePublic, str] | None | str:
         record = await self._prepare_send(user_id, session_id)
         if record is None:
@@ -517,17 +552,143 @@ class SessionService:
         if record == "ended":
             return "ended"
 
-        _, confirmed_position = await self._prepare_agent_context(
-            user_id, session_id, "确认会议预约"
+        user_content = _confirm_user_content("确认开始办理会议预约", supplementary_content)
+        _, confirmed_position, travel_staff_level = await self._prepare_agent_context(
+            user_id, session_id, user_content
         )
 
         workflow = await MeetingWorkflowService(self.session_repo.db).confirm_meeting_plan(
-            user_id, session_id
+            user_id,
+            session_id,
+            supplementary_content=supplementary_content,
+            card_draft=card_draft,
         )
         if not workflow:
             return None
 
-        user_content = "确认开始办理会议预约"
+        reply_content, message_type, metadata = await self.agent_service.finalize_outgoing(
+            session_id,
+            user_content,
+            workflow[0],
+            workflow[1],
+            workflow[2],
+            confirmed_position,
+        )
+        user_msg = await self.message_repo.create(session_id, "user", user_content, "text")
+        assistant_msg = await self.message_repo.create(
+            session_id,
+            "assistant",
+            reply_content,
+            message_type,
+            metadata=metadata,
+        )
+        record.message_count += 2
+        session_title = await self._refresh_session_title(record)
+        await self.session_repo.update(record)
+        return (
+            _to_message_public(user_msg),
+            _to_message_public(assistant_msg),
+            session_title,
+        )
+
+    async def confirm_leave_plan(
+        self,
+        user_id: int,
+        session_id: str,
+        *,
+        reason: str | None = None,
+        attachment_name: str | None = None,
+        leave_type: str | None = None,
+        date_start: str | None = None,
+        date_end: str | None = None,
+        start_period: str | None = None,
+        end_period: str | None = None,
+        supplementary_content: str | None = None,
+        card_draft: dict | None = None,
+    ) -> tuple[MessagePublic, MessagePublic, str] | None | str:
+        record = await self._prepare_send(user_id, session_id)
+        if record is None:
+            return None
+        if record == "ended":
+            return "ended"
+
+        user_content = _confirm_user_content("确认提交请假申请", supplementary_content)
+        _, confirmed_position, travel_staff_level = await self._prepare_agent_context(
+            user_id, session_id, user_content
+        )
+
+        workflow = await LeaveWorkflowService(self.session_repo.db).confirm_leave_plan(
+            user_id,
+            session_id,
+            reason=reason,
+            attachment_name=attachment_name,
+            leave_type=leave_type,
+            date_start=date_start,
+            date_end=date_end,
+            start_period=start_period,
+            end_period=end_period,
+            supplementary_content=supplementary_content,
+            card_draft=card_draft,
+        )
+        if not workflow:
+            return None
+
+        reply_content, message_type, metadata = await self.agent_service.finalize_outgoing(
+            session_id,
+            user_content,
+            workflow[0],
+            workflow[1],
+            workflow[2],
+            confirmed_position,
+        )
+        user_msg = await self.message_repo.create(session_id, "user", user_content, "text")
+        assistant_msg = await self.message_repo.create(
+            session_id,
+            "assistant",
+            reply_content,
+            message_type,
+            metadata=metadata,
+        )
+        record.message_count += 2
+        session_title = await self._refresh_session_title(record)
+        await self.session_repo.update(record)
+        return (
+            _to_message_public(user_msg),
+            _to_message_public(assistant_msg),
+            session_title,
+        )
+
+    async def confirm_info_collect_plan(
+        self,
+        user_id: int,
+        session_id: str,
+        *,
+        structured: dict | None = None,
+        supplementary_content: str | None = None,
+    ) -> tuple[MessagePublic, MessagePublic, str] | None | str:
+        record = await self._prepare_send(user_id, session_id)
+        if record is None:
+            return None
+        if record == "ended":
+            return "ended"
+
+        user_content = _confirm_user_content("确认保存核心个人信息到长期记忆", supplementary_content)
+        _, confirmed_position, travel_staff_level = await self._prepare_agent_context(
+            user_id, session_id, user_content
+        )
+
+        try:
+            workflow = await InfoCollectWorkflowService(self.session_repo.db).confirm_info_collect_plan(
+                user_id,
+                session_id,
+                structured=structured,
+                supplementary_content=supplementary_content,
+            )
+        except ValueError as exc:
+            return ("validation_error", str(exc))
+        if not workflow:
+            return None
+
         reply_content, message_type, metadata = await self.agent_service.finalize_outgoing(
             session_id,
             user_content,

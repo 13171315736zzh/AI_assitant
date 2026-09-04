@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import date, timedelta
+from datetime import date
 
 from src.agent.workpackage_workflow import (
     DEFAULT_HOURS_PER_DAY,
+    LeaveSlot,
     _WEEKDAY_NAMES,
+    _hours_for_workday,
     compute_this_week_range,
     format_date_range,
 )
+from src.integrations.work_calendar import holiday_label, is_workday, list_rest_days, list_workdays
 
 
 @dataclass
@@ -34,6 +37,8 @@ class TimesheetFillPlan:
     fillable_days: float
     entries: list[dict]
     conflicts: list[TimesheetConflict]
+    skipped_days: list[dict]
+    total_hours: float
 
     def to_public_dict(self) -> dict:
         return {
@@ -43,6 +48,8 @@ class TimesheetFillPlan:
             "fillable_days": self.fillable_days,
             "entries": self.entries,
             "conflicts": [c.to_public_dict() for c in self.conflicts],
+            "skipped_days": self.skipped_days,
+            "total_hours": self.total_hours,
         }
 
 
@@ -50,14 +57,17 @@ def _weekday_label(day: date) -> str:
     return _WEEKDAY_NAMES[day.weekday()]
 
 
-def _iter_weekdays(start: date, end: date) -> list[tuple[str, str]]:
-    days: list[tuple[str, str]] = []
-    current = start
-    while current <= end:
-        if current.weekday() < 5:
-            days.append((_weekday_label(current), current.isoformat()))
-        current += timedelta(days=1)
-    return days
+def _build_skipped_days(week_start: date, week_end: date) -> list[dict]:
+    skipped: list[dict] = []
+    for item in list_rest_days(week_start, week_end):
+        day = date.fromisoformat(item["day_date"])
+        skipped.append(
+            {
+                **item,
+                "day_label": _weekday_label(day),
+            }
+        )
+    return skipped
 
 
 async def query_weekly_fill_plan(
@@ -68,70 +78,69 @@ async def query_weekly_fill_plan(
     date_start: str | None = None,
     date_end: str | None = None,
     hours_per_day: float = DEFAULT_HOURS_PER_DAY,
+    leave_slots: list[LeaveSlot] | None = None,
+    full_week: bool = False,
 ) -> TimesheetFillPlan:
-    """生成本周（周一至今天）填报计划，演示周三下午已有宁煤项目占用。"""
+    """按当年法定工作日历与用户请假生成填报计划。"""
+    leave_slots = leave_slots or []
+
     if date_start and date_end:
         week_start = date.fromisoformat(date_start)
         week_end = date.fromisoformat(date_end)
     else:
-        week_start, week_end, _ = compute_this_week_range()
+        week_start, week_end, _ = compute_this_week_range(full_week=full_week)
 
     period_label = (
         format_date_range(week_start, week_end)
         if period_hint == "本周" or date_start
         else (period_hint or "本周")
     )
-    days = _iter_weekdays(week_start, week_end)
 
-    conflicts: list[TimesheetConflict] = []
-    wed_in_range = any(label == "周三" for label, _ in days)
-    if wed_in_range:
-        wed_date = next(d for label, d in days if label == "周三")
-        conflicts.append(
-            TimesheetConflict(
-                day_label="周三",
-                day_date=wed_date,
-                period="下午",
-                existing_project="宁煤项目",
-                person_days=0.5,
-                hours=hours_per_day / 2,
-            )
-        )
+    skipped_days = _build_skipped_days(week_start, week_end)
+    work_dates = list_workdays(week_start, week_end)
 
     entries: list[dict] = []
-    for label, day_date in days:
-        if label == "周三" and wed_in_range:
-            entries.append(
+    for day in work_dates:
+        weekday = day.weekday()
+        hours_info = _hours_for_workday(weekday, leave_slots, hours_per_day)
+        if hours_info is None:
+            label = _weekday_label(day)
+            skipped_days.append(
                 {
+                    "day_date": day.isoformat(),
                     "day_label": label,
-                    "day_date": day_date,
-                    "period": "上午",
-                    "project": project,
-                    "person_days": 0.5,
-                    "hours": hours_per_day / 2,
-                    "selected": True,
+                    "reason": "请假",
                 }
             )
             continue
+
+        hours, period = hours_info
+        person_days = round(hours / hours_per_day, 2) if hours_per_day else 0.0
         entries.append(
             {
-                "day_label": label,
-                "day_date": day_date,
-                "period": "全天",
+                "day_label": _weekday_label(day),
+                "day_date": day.isoformat(),
+                "period": period,
                 "project": project,
-                "person_days": 1.0,
-                "hours": hours_per_day,
+                "person_days": person_days,
+                "hours": hours,
                 "selected": True,
             }
         )
 
-    fillable = max(0.0, fill_days - (0.5 if wed_in_range else 0.0))
+    total_hours = sum(entry["hours"] for entry in entries)
+    requested_days = len(entries)
+    fillable = total_hours / hours_per_day if hours_per_day else float(requested_days)
+
+    _ = fill_days  # 实际以工作日历与请假结果为准
 
     return TimesheetFillPlan(
         project=project,
         period_label=period_label,
-        requested_days=fill_days,
+        requested_days=float(requested_days),
         fillable_days=fillable,
         entries=entries,
-        conflicts=conflicts,
+        conflicts=[],
+        skipped_days=skipped_days,
+        total_hours=total_hours,
     )

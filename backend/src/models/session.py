@@ -53,6 +53,9 @@ class RoomSelectionConfirm(BaseModel):
 class WorkpackagePlanConfirm(BaseModel):
     confirmed: bool = True
     project: str | None = Field(default=None, max_length=128)
+    all_days_eight_hours: bool | None = None
+    hours_per_day: float | None = Field(default=None, ge=0.5, le=24)
+    supplementary_content: str | None = Field(default=None, max_length=8000)
 
 
 class WorkpackageConfirm(BaseModel):
@@ -60,8 +63,38 @@ class WorkpackageConfirm(BaseModel):
     entries: list[dict[str, Any]] | None = None
 
 
+class LeavePlanConfirm(BaseModel):
+    confirmed: bool = True
+    reason: str | None = Field(default=None, max_length=500)
+    attachment_name: str | None = Field(default=None, max_length=256)
+    leave_type: str | None = Field(default=None, max_length=32)
+    date_start: str | None = Field(default=None, max_length=16)
+    date_end: str | None = Field(default=None, max_length=16)
+    start_period: str | None = Field(default=None, max_length=16)
+    end_period: str | None = Field(default=None, max_length=16)
+    supplementary_content: str | None = Field(default=None, max_length=8000)
+
+
+class InfoCollectPlanConfirm(BaseModel):
+    confirmed: bool = True
+    structured: dict[str, Any] | None = None
+    supplementary_content: str | None = Field(default=None, max_length=8000)
+
+
 class PlanConfirm(BaseModel):
     confirmed: bool = True
+    supplementary_content: str | None = Field(default=None, max_length=8000)
+
+
+class MeetingPlanConfirm(PlanConfirm):
+    subject: str | None = Field(default=None, max_length=128)
+    room: str | None = Field(default=None, max_length=32)
+    selected_room: str | None = Field(default=None, max_length=32)
+    room_flexible: bool | None = None
+    attendees: str | None = Field(default=None, max_length=256)
+    date_hint: str | None = Field(default=None, max_length=64)
+    start_hint: str | None = Field(default=None, max_length=16)
+    end_hint: str | None = Field(default=None, max_length=16)
 
 
 class SendMessageData(BaseModel):

@@ -8,13 +8,25 @@ import type {
   WorkpackageConfirmMeta,
   WorkpackagePlanConfirmMeta,
   PlanConfirmMeta,
+  MeetingPlanConfirmMeta,
+  LeavePlanConfirmMeta,
+  InfoCollectPlanConfirmMeta,
+  WorkflowNextNode,
+  GnMeetingResultMeta,
+  RoomBookingResultMeta,
+  RelatedTaskMeta,
 } from '@/types'
 import { formatMessageHtml } from '@/utils/messageFormat'
 import TravelBookingPicker from '@/components/chat/TravelBookingPicker.vue'
 import MeetingRoomPicker from '@/components/chat/MeetingRoomPicker.vue'
 import WorkpackageConfirmPanel from '@/components/chat/WorkpackageConfirmPanel.vue'
 import WorkpackagePlanConfirmPanel from '@/components/chat/WorkpackagePlanConfirmPanel.vue'
+import MeetingPlanConfirmPanel from '@/components/chat/MeetingPlanConfirmPanel.vue'
 import IntentPlanConfirmPanel from '@/components/chat/IntentPlanConfirmPanel.vue'
+import LeavePlanConfirmPanel from '@/components/chat/LeavePlanConfirmPanel.vue'
+import MemoryCollectConfirmPanel from '@/components/chat/MemoryCollectConfirmPanel.vue'
+import GnMeetingResultPanel from '@/components/chat/GnMeetingResultPanel.vue'
+import RoomBookingResultPanel from '@/components/chat/RoomBookingResultPanel.vue'
 import WelcomeQuickActions from '@/components/chat/WelcomeQuickActions.vue'
 
 const props = defineProps<{
@@ -29,9 +41,36 @@ const emit = defineEmits<{
   confirmBooking: [payload: { messageId: string; flight_no?: string; hotel_name?: string }]
   confirmRoom: [payload: { messageId: string; room: string }]
   confirmWorkpackage: [payload: { messageId: string; entries: import('@/types').TimesheetEntry[] }]
-  confirmWorkpackagePlan: [payload: { messageId: string; project?: string }]
+  confirmWorkpackagePlan: [payload: {
+    messageId: string
+    project?: string
+    all_days_eight_hours?: boolean
+    hours_per_day?: number
+  }]
   confirmTravelPlan: [payload: { messageId: string }]
-  confirmMeetingPlan: [payload: { messageId: string }]
+  confirmMeetingPlan: [payload: {
+    messageId: string
+    supplementary_content?: string
+    subject?: string
+    room?: string | null
+    room_flexible?: boolean
+    attendees?: string
+    date_hint?: string
+    start_hint?: string
+    end_hint?: string
+  }]
+  confirmLeavePlan: [payload: {
+    messageId: string
+    reason: string
+    attachment_name?: string
+    leave_type?: string
+    date_start?: string
+    date_end?: string
+    start_period?: string
+    end_period?: string
+  }]
+  confirmInfoCollectPlan: [payload: { messageId: string; structured: import('@/mocks/settings').MemoryStructured }]
+  updateCardDraft: [draft: import('@/utils/workflowCardDraft').WorkflowCardDraft]
   quickStart: [prompt: string]
 }>()
 
@@ -66,12 +105,41 @@ onMounted(() => {
 
 function taskMeta(msg: Message) {
   const m = msg.metadata ?? {}
+  const percent = (m.progress_percent as number) ?? 50
+  const status = (m.status as string) ?? ''
   return {
     title: (m.task_title as string) ?? '任务进行中',
     progress: (m.progress as string) ?? '',
-    percent: (m.progress_percent as number) ?? 50,
+    percent,
     stepsDesc: (m.steps_desc as string) ?? '',
     taskId: (m.task_id as string) ?? '',
+    completed: status === 'completed' || percent >= 100,
+  }
+}
+
+function relatedTasks(msg: Message): RelatedTaskMeta[] {
+  const raw = msg.metadata?.related_tasks as RelatedTaskMeta[] | undefined
+  return Array.isArray(raw) ? raw : []
+}
+
+function gnMeetingResult(msg: Message): GnMeetingResultMeta | null {
+  const raw = msg.metadata?.gn_meeting_result as GnMeetingResultMeta | undefined
+  return raw?.meeting_link ? raw : null
+}
+
+function roomBookingResult(msg: Message): RoomBookingResultMeta | null {
+  const raw = msg.metadata?.room_booking_result as RoomBookingResultMeta | undefined
+  return raw?.room_name ? raw : null
+}
+
+function taskCardMetaFromRelated(task: RelatedTaskMeta) {
+  return {
+    title: task.task_title,
+    progress: task.progress,
+    percent: task.progress_percent ?? 50,
+    stepsDesc: task.steps_desc,
+    taskId: task.task_id,
+    completed: (task.progress_percent ?? 0) >= 100,
   }
 }
 
@@ -87,17 +155,38 @@ interface PolicyReminderMeta {
   clause: string
 }
 
+function workflowNextNode(msg: Message): WorkflowNextNode | null {
+  const raw = msg.metadata?.workflow_next_node as WorkflowNextNode | undefined
+  if (!raw) return null
+  if (raw.node_id === null && !raw.label) return null
+  return raw
+}
+
 function policyReminders(msg: Message): PolicyReminderMeta[] {
-  if (
-    msg.metadata?.workpackage_confirm
-    || msg.metadata?.workpackage_plan_confirm
-    || msg.metadata?.meeting_plan_confirm
-    || msg.metadata?.room_selection
-  ) {
+  if (hasNonTravelWorkflowSurface(msg)) {
     return []
   }
   const list = msg.metadata?.policy_reminders as PolicyReminderMeta[] | undefined
   return list ?? []
+}
+
+function hasNonTravelWorkflowSurface(msg: Message): boolean {
+  const meta = msg.metadata ?? {}
+  return Boolean(
+    meta.workpackage_confirm
+    || meta.workpackage_plan_confirm
+    || meta.meeting_plan_confirm
+    || meta.leave_plan_confirm
+    || meta.info_collect_plan_confirm
+    || meta.room_selection
+  )
+}
+
+function policySources(msg: Message): MessageSource[] {
+  if (hasNonTravelWorkflowSurface(msg)) {
+    return []
+  }
+  return sources(msg)
 }
 
 function shouldRenderHtml(msg: Message): boolean {
@@ -140,7 +229,9 @@ function hasInteractivePicker(msg: Message): boolean {
     || workpackageConfirm(msg)
     || workpackagePlanConfirm(msg)
     || travelPlanConfirm(msg)
-    || meetingPlanConfirm(msg),
+    || meetingPlanConfirm(msg)
+    || leavePlanConfirm(msg)
+    || infoCollectPlanConfirm(msg),
   )
 }
 
@@ -171,13 +262,25 @@ function workpackagePlanConfirm(msg: Message): WorkpackagePlanConfirmMeta | null
 
 function travelPlanConfirm(msg: Message): PlanConfirmMeta | null {
   const raw = msg.metadata?.travel_plan_confirm as PlanConfirmMeta | undefined
-  if (!raw?.items?.length) return null
+  if (!raw?.items?.length || raw.status !== 'pending') return null
   return raw
 }
 
-function meetingPlanConfirm(msg: Message): PlanConfirmMeta | null {
-  const raw = msg.metadata?.meeting_plan_confirm as PlanConfirmMeta | undefined
-  if (!raw?.items?.length) return null
+function meetingPlanConfirm(msg: Message): MeetingPlanConfirmMeta | null {
+  const raw = msg.metadata?.meeting_plan_confirm as MeetingPlanConfirmMeta | undefined
+  if (!raw?.items?.length || raw.status !== 'pending') return null
+  return raw
+}
+
+function leavePlanConfirm(msg: Message): LeavePlanConfirmMeta | null {
+  const raw = msg.metadata?.leave_plan_confirm as LeavePlanConfirmMeta | undefined
+  if (!raw?.items?.length || raw.status !== 'pending') return null
+  return raw
+}
+
+function infoCollectPlanConfirm(msg: Message): InfoCollectPlanConfirmMeta | null {
+  const raw = msg.metadata?.info_collect_plan_confirm as InfoCollectPlanConfirmMeta | undefined
+  if (!raw || raw.status !== 'pending') return null
   return raw
 }
 </script>
@@ -214,6 +317,26 @@ function meetingPlanConfirm(msg: Message): PlanConfirmMeta | null {
         />
         <template v-else>{{ msg.content }}</template>
 
+        <div v-if="workflowNextNode(msg)" class="next-node-block">
+          <div class="next-node-label">下一办理节点</div>
+          <div v-if="workflowNextNode(msg)?.label" class="next-node-title">
+            {{ workflowNextNode(msg)?.label }}
+          </div>
+          <div
+            v-if="(workflowNextNode(msg)?.missing_slots?.length ?? 0) > 0"
+            class="next-node-slots"
+          >
+            待补充：
+            <span
+              v-for="slot in workflowNextNode(msg)?.missing_slots"
+              :key="slot"
+              class="slot-chip"
+            >
+              {{ slot }}
+            </span>
+          </div>
+        </div>
+
         <div v-if="hasInteractivePicker(msg)" class="interactive-zone">
         <TravelBookingPicker
           v-if="bookingSelection(msg)"
@@ -236,18 +359,66 @@ function meetingPlanConfirm(msg: Message): PlanConfirmMeta | null {
           @confirm="emit('confirmTravelPlan', { messageId: msg.id })"
         />
 
-        <IntentPlanConfirmPanel
+        <MeetingPlanConfirmPanel
           v-if="meetingPlanConfirm(msg)"
           :confirm="meetingPlanConfirm(msg)!"
           :submitting="workflowSubmitting"
-          @confirm="emit('confirmMeetingPlan', { messageId: msg.id })"
+          @update-draft="emit('updateCardDraft', {
+            messageId: msg.id,
+            metaKey: 'meeting_plan_confirm',
+            payload: $event,
+          })"
+          @confirm="emit('confirmMeetingPlan', {
+            messageId: msg.id,
+            ...$event,
+          })"
+        />
+
+        <LeavePlanConfirmPanel
+          v-if="leavePlanConfirm(msg)"
+          :confirm="leavePlanConfirm(msg)!"
+          :submitting="workflowSubmitting"
+          @update-draft="emit('updateCardDraft', {
+            messageId: msg.id,
+            metaKey: 'leave_plan_confirm',
+            payload: $event,
+          })"
+          @confirm="emit('confirmLeavePlan', {
+            messageId: msg.id,
+            ...$event,
+          })"
+        />
+
+        <MemoryCollectConfirmPanel
+          v-if="infoCollectPlanConfirm(msg)"
+          :confirm="infoCollectPlanConfirm(msg)!"
+          :submitting="workflowSubmitting"
+          @update-draft="emit('updateCardDraft', {
+            messageId: msg.id,
+            metaKey: 'info_collect_plan_confirm',
+            payload: $event,
+          })"
+          @confirm="emit('confirmInfoCollectPlan', {
+            messageId: msg.id,
+            structured: $event.structured,
+          })"
         />
 
         <WorkpackagePlanConfirmPanel
           v-if="workpackagePlanConfirm(msg)"
           :confirm="workpackagePlanConfirm(msg)!"
           :submitting="workflowSubmitting"
-          @confirm="emit('confirmWorkpackagePlan', { messageId: msg.id, project: $event.project })"
+          @update-draft="emit('updateCardDraft', {
+            messageId: msg.id,
+            metaKey: 'workpackage_plan_confirm',
+            payload: $event,
+          })"
+          @confirm="emit('confirmWorkpackagePlan', {
+            messageId: msg.id,
+            project: $event.project,
+            all_days_eight_hours: $event.all_days_eight_hours,
+            hours_per_day: $event.hours_per_day,
+          })"
         />
 
         <WorkpackageConfirmPanel
@@ -258,14 +429,53 @@ function meetingPlanConfirm(msg: Message): PlanConfirmMeta | null {
         />
         </div>
 
+        <GnMeetingResultPanel
+          v-if="gnMeetingResult(msg)"
+          :result="gnMeetingResult(msg)!"
+        />
+
+        <RoomBookingResultPanel
+          v-if="roomBookingResult(msg)"
+          :result="roomBookingResult(msg)!"
+        />
+
+        <template v-if="relatedTasks(msg).length">
+          <div
+            v-for="task in relatedTasks(msg)"
+            :key="task.task_id"
+            class="task-card"
+            :class="{ completed: taskCardMetaFromRelated(task).completed }"
+            @click="emit('openTask', task.task_id)"
+          >
+            <div class="task-card-header">
+              <span class="task-card-title">{{ taskCardMetaFromRelated(task).title }}</span>
+              <span class="task-card-progress">
+                {{ taskCardMetaFromRelated(task).completed
+                  ? '已完成'
+                  : `${taskCardMetaFromRelated(task).progress} 步骤` }}
+              </span>
+            </div>
+            <div class="progress-bar">
+              <div
+                class="progress-fill"
+                :style="{ width: `${taskCardMetaFromRelated(task).percent}%` }"
+              />
+            </div>
+            <div class="task-card-desc">{{ taskCardMetaFromRelated(task).stepsDesc }}</div>
+          </div>
+        </template>
+
         <div
-          v-if="msg.message_type === 'task'"
+          v-else-if="msg.message_type === 'task'"
           class="task-card"
+          :class="{ completed: taskMeta(msg).completed }"
           @click="emit('openTask', taskMeta(msg).taskId)"
         >
           <div class="task-card-header">
             <span class="task-card-title">{{ taskMeta(msg).title }}</span>
-            <span class="task-card-progress">{{ taskMeta(msg).progress }} 步骤</span>
+            <span class="task-card-progress">
+              {{ taskMeta(msg).completed ? '已完成' : `${taskMeta(msg).progress} 步骤` }}
+            </span>
           </div>
           <div class="progress-bar">
             <div
@@ -286,7 +496,7 @@ function meetingPlanConfirm(msg: Message): PlanConfirmMeta | null {
           </ul>
         </div>
 
-        <div v-if="sources(msg).length" class="source-block">
+        <div v-if="policySources(msg).length" class="source-block">
           <button
             type="button"
             class="source-toggle"
@@ -296,7 +506,7 @@ function meetingPlanConfirm(msg: Message): PlanConfirmMeta | null {
             <span class="source-toggle-left">
               <span class="source-chevron" :class="{ open: isPolicyExpanded(msg.id) }" aria-hidden="true" />
               <span class="source-label">政策依据</span>
-              <span class="source-count">{{ sources(msg).length }} 条</span>
+              <span class="source-count">{{ policySources(msg).length }} 条</span>
             </span>
             <span class="source-toggle-hint">
               {{ isPolicyExpanded(msg.id) ? '收起' : '展开' }}
@@ -306,7 +516,7 @@ function meetingPlanConfirm(msg: Message): PlanConfirmMeta | null {
           <Transition name="policy-drawer">
             <div v-show="isPolicyExpanded(msg.id)" class="source-body">
               <div
-                v-for="(src, i) in sources(msg)"
+                v-for="(src, i) in policySources(msg)"
                 :key="i"
                 class="source-card"
               >
@@ -450,6 +660,19 @@ function meetingPlanConfirm(msg: Message): PlanConfirmMeta | null {
   border-color: var(--primary);
 }
 
+.task-card.completed {
+  border-color: #86efac;
+  background: color-mix(in srgb, #059669 6%, var(--bg));
+}
+
+.task-card.completed .task-card-progress {
+  color: #059669;
+}
+
+.task-card.completed .progress-fill {
+  background: #059669;
+}
+
 .task-card-header {
   display: flex;
   justify-content: space-between;
@@ -486,6 +709,49 @@ function meetingPlanConfirm(msg: Message): PlanConfirmMeta | null {
 .task-card-desc {
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+.next-node-block {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid #bfdbfe;
+  border-left: 4px solid #2563eb;
+  border-radius: var(--radius-sm);
+  background: #eff6ff;
+}
+
+.next-node-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #1d4ed8;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+.next-node-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1e3a8a;
+  margin-bottom: 8px;
+}
+
+.next-node-slots {
+  font-size: 13px;
+  color: #334155;
+  line-height: 1.6;
+}
+
+.slot-chip {
+  display: inline-block;
+  margin: 2px 6px 2px 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #fff;
+  border: 1px solid #93c5fd;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .interactive-zone {

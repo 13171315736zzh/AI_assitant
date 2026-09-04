@@ -11,6 +11,10 @@ import {
   STATUS_LABELS,
 } from '@/utils/taskCatalog'
 import { isTravelTask, openOaTravelApply } from '@/utils/oaTravel'
+import { isWorkpackageTask, openOaWorkpackageApply } from '@/utils/oaWorkpackage'
+import { isLeaveTask, openOaLeaveApply } from '@/utils/oaLeave'
+import { isGnMeetingTask, isRoomBookingTask, openOaGnMeetingApply, openOaRoomMeetingApply } from '@/utils/oaMeeting'
+import { useOaTaskSync } from '@/composables/useOaTaskSync'
 
 type FilterKey = 'all' | 'running' | 'completed' | 'cancelled'
 
@@ -36,8 +40,11 @@ const filterTabs: { key: FilterKey; label: string }[] = [
 const categoryTabs: { key: TaskCategory | 'all'; label: string }[] = [
   { key: 'all', label: '全部类型' },
   { key: 'travel', label: '差旅办事' },
-  { key: 'meeting', label: '会议预约' },
+  { key: 'meeting', label: '会议室预约' },
+  { key: 'gn_meeting', label: '国能会议' },
   { key: 'workpackage', label: '工时填报' },
+  { key: 'leave', label: '请假申请' },
+  { key: 'info_collect', label: '信息收集' },
   { key: 'email', label: '邮件撰写' },
 ]
 
@@ -78,6 +85,10 @@ watch([filter, categoryFilter], () => {
 })
 
 onMounted(loadTasks)
+
+useOaTaskSync(() => {
+  loadTasks()
+})
 
 function formatTime(iso: string) {
   const d = new Date(iso)
@@ -120,10 +131,30 @@ function openForm(formId: string) {
   activeFormId.value = formId
 }
 
-async function handleOpenOa(taskId: string) {
+async function handleOpenOa(
+  taskId: string,
+  category: 'travel' | 'workpackage' | 'leave' | 'meeting' | 'gn_meeting',
+) {
   const res = await fetchTask(taskId)
-  if (res.code === 200 && isTravelTask(res.data)) {
+  if (res.code !== 200) return
+  if (category === 'travel' && isTravelTask(res.data)) {
     openOaTravelApply(taskId)
+    return
+  }
+  if (category === 'workpackage' && isWorkpackageTask(res.data)) {
+    openOaWorkpackageApply(taskId)
+    return
+  }
+  if (category === 'leave' && isLeaveTask(res.data)) {
+    openOaLeaveApply(taskId)
+    return
+  }
+  if (category === 'gn_meeting' && isGnMeetingTask(res.data)) {
+    openOaGnMeetingApply(taskId)
+    return
+  }
+  if (category === 'meeting' && isRoomBookingTask(res.data)) {
+    openOaRoomMeetingApply(taskId)
   }
 }
 
@@ -152,7 +183,7 @@ function nextPage() {
           <div>
             <h1>我的任务</h1>
             <p class="subtitle">
-              汇总通过智能办公助手创建的所有办事任务：差旅申请、机票/酒店预订、工时填报、会议预约、邮件撰写等，随时查看办理进度与历史记录。
+              汇总通过智能办公助手创建的所有办事任务：差旅申请、机票/酒店预订、工时填报、请假申请、会议预约、邮件撰写等，随时查看办理进度与历史记录。
             </p>
           </div>
           <button type="button" class="btn-back" @click="router.push({ name: 'chat' })">
@@ -249,9 +280,41 @@ function nextPage() {
                 v-if="task.category === 'travel' && task.status === 'running'"
                 type="button"
                 class="action-btn secondary"
-                @click="handleOpenOa(task.id)"
+                @click="handleOpenOa(task.id, 'travel')"
               >
                 OA 差旅页
+              </button>
+              <button
+                v-if="task.category === 'workpackage' && task.status === 'running'"
+                type="button"
+                class="action-btn secondary"
+                @click="handleOpenOa(task.id, 'workpackage')"
+              >
+                OA 工时页
+              </button>
+              <button
+                v-if="task.category === 'leave' && task.status === 'running'"
+                type="button"
+                class="action-btn secondary"
+                @click="handleOpenOa(task.id, 'leave')"
+              >
+                OA 请假页
+              </button>
+              <button
+                v-if="task.category === 'meeting' && task.status === 'running'"
+                type="button"
+                class="action-btn secondary"
+                @click="handleOpenOa(task.id, 'meeting')"
+              >
+                OA 会议室页
+              </button>
+              <button
+                v-if="task.category === 'gn_meeting' && task.status === 'running'"
+                type="button"
+                class="action-btn secondary"
+                @click="handleOpenOa(task.id, 'gn_meeting')"
+              >
+                OA 国能会页
               </button>
             </div>
           </article>

@@ -88,6 +88,79 @@ export async function confirmTask(
   return data
 }
 
+export async function submitOaApplication(
+  taskId: string,
+): Promise<
+  ApiResponse<{
+    task: Task
+    session_id: string
+    receipt_id?: string | null
+  }>
+> {
+  if (isMockMode('tasks')) {
+    await delay(300)
+    const task = mockGetTask(taskId)
+    if (!task) {
+      return {
+        code: 404,
+        message: '任务不存在',
+        data: null as unknown as { task: Task; session_id: string },
+      }
+    }
+    return {
+      code: 200,
+      message: 'success',
+      data: {
+        task: { ...task, status: 'running' },
+        session_id: task.session_id,
+        receipt_id: `RC${Date.now()}`,
+      },
+    }
+  }
+  const { data } = await api.post(`/tasks/${taskId}/oa-submit`)
+  return data
+}
+
+export async function approveOaApplication(
+  taskId: string,
+): Promise<
+  ApiResponse<{
+    task: Task
+    session_id: string
+    receipt_id?: string | null
+    assistant_message?: import('@/types').Message | null
+  }>
+> {
+  if (isMockMode('tasks')) {
+    await delay(400)
+    const task = mockGetTask(taskId)
+    if (!task) {
+      return {
+        code: 404,
+        message: '任务不存在',
+        data: null as unknown as { task: Task; session_id: string },
+      }
+    }
+    const completedSteps = task.steps.map((step) => ({ ...step, status: 'completed' as const }))
+    return {
+      code: 200,
+      message: 'success',
+      data: {
+        task: {
+          ...task,
+          status: 'completed',
+          current_step: task.total_steps,
+          steps: completedSteps,
+        },
+        session_id: task.session_id,
+        receipt_id: `RC${Date.now()}`,
+      },
+    }
+  }
+  const { data } = await api.post(`/tasks/${taskId}/oa-approve`)
+  return data
+}
+
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }

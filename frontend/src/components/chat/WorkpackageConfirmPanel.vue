@@ -50,6 +50,15 @@ function handleConfirm() {
 
 <template>
   <div class="wp-confirm" :class="{ confirmed: !isPending }">
+    <section v-if="confirm.skipped_days?.length" class="skipped-section">
+      <h4 class="section-title">已跳过（假期/非工作日）</h4>
+      <ul class="skipped-list">
+        <li v-for="(item, i) in confirm.skipped_days" :key="i">
+          {{ item.day_label || item.day_date }} · {{ item.reason }}
+        </li>
+      </ul>
+    </section>
+
     <section v-if="confirm.conflicts.length" class="conflict-section">
       <h4 class="section-title">冲突提示</h4>
       <ul class="conflict-list">
@@ -90,7 +99,9 @@ function handleConfirm() {
     <div v-if="isPending" class="confirm-footer">
       <p class="confirm-hint">
         已选 <strong>{{ selectedCount }}</strong> 天，合计
-        <strong>{{ totalHours }} 小时</strong>，确认后将生成填报表单。
+        <strong>{{ totalHours }}</strong> 小时
+        <template v-if="confirm.total_hours">（计划 {{ confirm.total_hours }} 小时）</template>
+        ，确认后将生成填报表单。
       </p>
       <button
         type="button"
@@ -120,6 +131,22 @@ function handleConfirm() {
   background: #fff8f0;
   border: 1px solid #f0dcc8;
   border-radius: var(--radius-sm);
+}
+
+.skipped-section {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  background: #f5f8ff;
+  border: 1px solid #d8e0f0;
+  border-radius: var(--radius-sm);
+}
+
+.skipped-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-secondary);
 }
 
 .section-title {

@@ -45,6 +45,13 @@ class TaskConfirmPublic(BaseModel):
     current_step: int
 
 
+class OaTaskActionPublic(BaseModel):
+    task: TaskPublic
+    session_id: str
+    receipt_id: str | None = None
+    assistant_message: dict | None = None
+
+
 class TaskSummaryPublic(BaseModel):
     id: str
     session_id: str

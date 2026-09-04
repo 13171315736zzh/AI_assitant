@@ -27,6 +27,12 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      path: '/memory',
+      name: 'user-memory',
+      component: () => import('@/pages/MemoryPage.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       path: '/help/knowledge',
       name: 'knowledge-help',
       component: () => import('@/pages/KnowledgeHelpPage.vue'),
@@ -36,6 +42,36 @@ const router = createRouter({
       path: '/oa/travel/:taskId',
       name: 'oa-travel-apply',
       component: () => import('@/pages/OaTravelApplyPage.vue'),
+      meta: { requiresAuth: true, standalone: true },
+    },
+    {
+      path: '/oa/workpackage/:taskId',
+      name: 'oa-workpackage-apply',
+      component: () => import('@/pages/OaWorkpackageApplyPage.vue'),
+      meta: { requiresAuth: true, standalone: true },
+    },
+    {
+      path: '/oa/leave/:taskId',
+      name: 'oa-leave-apply',
+      component: () => import('@/pages/OaLeaveApplyPage.vue'),
+      meta: { requiresAuth: true, standalone: true },
+    },
+    {
+      path: '/oa/meeting/:taskId',
+      name: 'oa-meeting-apply',
+      component: () => import('@/pages/OaMeetingApplyPage.vue'),
+      meta: { requiresAuth: true, standalone: true },
+    },
+    {
+      path: '/oa/gn-meeting/:taskId',
+      name: 'oa-gn-meeting-apply',
+      component: () => import('@/pages/OaMeetingApplyPage.vue'),
+      meta: { requiresAuth: true, standalone: true },
+    },
+    {
+      path: '/oa/room-meeting/:taskId',
+      name: 'oa-room-meeting-apply',
+      component: () => import('@/pages/OaMeetingApplyPage.vue'),
       meta: { requiresAuth: true, standalone: true },
     },
     {

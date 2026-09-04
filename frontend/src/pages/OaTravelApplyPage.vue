@@ -2,10 +2,19 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/useAuthStore'
-import { fetchTask } from '@/services/taskService'
+import { approveOaApplication, fetchTask, submitOaApplication } from '@/services/taskService'
 import { fetchForm } from '@/services/formService'
 import { formFieldLabels } from '@/mocks/forms'
 import type { FlightOption, HotelOption, Task } from '@/types'
+import {
+  buildTravelApprovalChain,
+  detectOaPhase,
+  isPrimaryButtonDisabled,
+  isPrimaryButtonSubmittedStyle,
+  notifyAssistantOaUpdate,
+  primaryButtonLabel,
+  type OaPhase,
+} from '@/utils/oaDemo'
 import {
   findFlightSelection,
   findHotelSelection,
@@ -22,7 +31,9 @@ const task = ref<Task | null>(null)
 const fields = ref<Record<string, string>>({})
 const flight = ref<FlightOption | null>(null)
 const hotel = ref<HotelOption | null>(null)
-const submitted = ref(false)
+const phase = ref<OaPhase>('draft')
+const submitting = ref(false)
+const toastMessage = ref<string | null>(null)
 
 const taskId = computed(() => String(route.params.taskId ?? ''))
 const labels = formFieldLabels.travel
@@ -43,12 +54,15 @@ const tripDays = computed(() => {
   return diff > 0 ? `${diff} 天` : '—'
 })
 
-const approvalChain = computed(() => [
-  { role: '申请人', name: auth.user?.display_name ?? '—', status: 'done', time: '刚刚' },
-  { role: '部门负责人', name: '待指定', status: 'pending', time: '—' },
-  { role: '分管领导', name: '待指定', status: 'pending', time: '—' },
-  { role: '行政审批', name: '差旅管理岗', status: 'pending', time: '—' },
-])
+const approvalChain = computed(() =>
+  buildTravelApprovalChain(auth.user?.display_name ?? '—', phase.value),
+)
+
+const statusBadge = computed(() => {
+  if (phase.value === 'approved') return { label: '已通过', class: 'approved' }
+  if (phase.value === 'submitted') return { label: '审批中', class: 'pending' }
+  return { label: '草稿', class: 'draft' }
+})
 
 async function load() {
   loading.value = true
@@ -60,6 +74,7 @@ async function load() {
       return
     }
     task.value = taskRes.data
+    phase.value = detectOaPhase(taskRes.data)
     flight.value = findFlightSelection(taskRes.data)
     hotel.value = findHotelSelection(taskRes.data)
 
@@ -81,8 +96,51 @@ async function load() {
   }
 }
 
-function handleSubmit() {
-  submitted.value = true
+async function handlePrimaryClick() {
+  if (!task.value || submitting.value || isPrimaryButtonDisabled(phase.value, submitting.value)) {
+    return
+  }
+
+  submitting.value = true
+  toastMessage.value = null
+  try {
+    if (phase.value === 'draft') {
+      const res = await submitOaApplication(taskId.value)
+      if (res.code !== 200 || !res.data) {
+        error.value = res.message || '提交失败，请重试'
+        return
+      }
+      task.value = res.data.task
+      phase.value = 'submitted'
+      toastMessage.value = `差旅申请 ${applicationNo.value} 已进入 OA 审批流程（演示）。再次点击灰色按钮可模拟审批通过。`
+      notifyAssistantOaUpdate({
+        sessionId: res.data.session_id,
+        taskId: taskId.value,
+        action: 'submitted',
+      })
+      return
+    }
+
+    if (phase.value === 'submitted') {
+      const res = await approveOaApplication(taskId.value)
+      if (res.code !== 200 || !res.data) {
+        error.value = res.message || '审批完成失败，请重试'
+        return
+      }
+      task.value = res.data.task
+      phase.value = 'approved'
+      toastMessage.value = '审批已全部通过，状态已同步至智能办公助手。'
+      notifyAssistantOaUpdate({
+        sessionId: res.data.session_id,
+        taskId: taskId.value,
+        action: 'completed',
+      })
+    }
+  } catch {
+    error.value = '操作失败，请返回助手重试'
+  } finally {
+    submitting.value = false
+  }
 }
 
 function closeWindow() {
@@ -134,7 +192,7 @@ onMounted(load)
           <header class="card-head">
             <h1>出差申请单</h1>
             <div class="head-meta">
-              <span class="badge draft">草稿</span>
+              <span class="badge" :class="statusBadge.class">{{ statusBadge.label }}</span>
               <span class="app-no">单号：{{ applicationNo }}</span>
             </div>
           </header>
@@ -258,23 +316,26 @@ onMounted(load)
         </section>
 
         <footer class="oa-footer">
-          <p class="footer-note">本页面为 OA 差旅系统模拟环境，提交后将进入演示审批流程。</p>
+          <p class="footer-note">
+            演示说明：首次点击「提交审批」进入审批中；再次点击灰色「已提交审批」可模拟全流程通过并同步回助手。
+          </p>
           <div class="footer-actions">
             <button type="button" class="btn-secondary" @click="closeWindow">关闭窗口</button>
             <button
               type="button"
               class="btn-primary"
-              :disabled="submitted"
-              @click="handleSubmit"
+              :class="{ submitted: isPrimaryButtonSubmittedStyle(phase) }"
+              :disabled="isPrimaryButtonDisabled(phase, submitting)"
+              @click="handlePrimaryClick"
             >
-              {{ submitted ? '已提交审批' : '提交审批' }}
+              {{ primaryButtonLabel(phase, submitting) }}
             </button>
           </div>
         </footer>
 
-        <div v-if="submitted" class="submit-toast">
-          <strong>提交成功</strong>
-          <p>差旅申请 {{ applicationNo }} 已进入 OA 审批流程（演示）。</p>
+        <div v-if="toastMessage" class="submit-toast">
+          <strong>{{ phase === 'approved' ? '审批完成' : '提交成功' }}</strong>
+          <p>{{ toastMessage }}</p>
         </div>
       </template>
     </main>
@@ -466,6 +527,16 @@ onMounted(load)
   color: #b45309;
 }
 
+.badge.pending {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.badge.approved {
+  background: #dcfce7;
+  color: #15803d;
+}
+
 .app-no {
   font-size: 13px;
   color: #64748b;
@@ -637,6 +708,15 @@ onMounted(load)
 .btn-primary:disabled {
   background: #94a3b8;
   cursor: default;
+}
+
+.btn-primary.submitted:not(:disabled) {
+  background: #94a3b8;
+  cursor: pointer;
+}
+
+.btn-primary.submitted:not(:disabled):hover {
+  background: #64748b;
 }
 
 .btn-secondary {

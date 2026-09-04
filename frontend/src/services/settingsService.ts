@@ -87,6 +87,7 @@ export async function fetchMemory(): Promise<ApiResponse<MemorySettings>> {
 
 export async function updateMemory(payload: {
   memory_enabled?: boolean
+  structured?: MemoryStructured
   memory_items?: MemoryItem[]
 }): Promise<ApiResponse<MemorySettings>> {
   if (isMockMode('settings')) {

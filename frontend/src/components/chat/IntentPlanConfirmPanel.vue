@@ -37,7 +37,7 @@ function handleConfirm() {
         :disabled="submitting"
         @click="handleConfirm"
       >
-        {{ submitting ? '处理中…' : (confirmLabel ?? '确认开始办理') }}
+        {{ submitting ? '处理中…' : (confirm.confirm_label ?? confirmLabel ?? '确认开始办理') }}
       </button>
     </div>
     <p v-else class="confirmed-hint">信息已确认，正在继续办理。</p>

@@ -364,6 +364,10 @@ def evaluate_travel_reminders(ctx: TravelContext) -> list[PolicyReminder]:
 
 
 def build_travel_rule_snippets(ctx: TravelContext) -> str:
+    from src.agent.policy_context import is_travel_reminder_eligible
+
+    if not is_travel_reminder_eligible(ctx.raw_text):
+        return ""
     if not re.search(r"出差|差旅|住宿|报销|火车|机票|酒店", ctx.raw_text):
         return ""
     lines = [build_policy_knowledge_summary()]
@@ -390,6 +394,19 @@ def format_reminder_block(reminders: list[PolicyReminder], max_items: int = 5) -
     return "\n".join(lines)
 
 
+_TRAVEL_REMINDER_BLOCK_RE = re.compile(
+    r"(?:^|\n)【差旅建议与规定提醒】[\s\S]*?(?=\n\n|\Z)"
+)
+
+
+def strip_travel_reminder_blocks(content: str) -> str:
+    """移除正文中的差旅建议块（非差旅办事场景兜底）。"""
+    if not content:
+        return content
+    cleaned = _TRAVEL_REMINDER_BLOCK_RE.sub("", content)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
 def reminders_to_sources(reminders: list[PolicyReminder], filename: str = POLICY_FILENAME) -> list[dict]:
     return [
         {
@@ -407,6 +424,11 @@ def apply_travel_reminders(
     assistant_content: str,
     ctx: TravelContext | None = None,
 ) -> tuple[str, list[PolicyReminder]]:
+    from src.agent.policy_context import is_travel_reminder_eligible
+
+    if not is_travel_reminder_eligible(user_content):
+        return assistant_content, []
+
     ctx = ctx or parse_travel_context(user_content)
     reminders = evaluate_travel_reminders(ctx)
     if not reminders:

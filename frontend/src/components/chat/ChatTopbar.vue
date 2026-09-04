@@ -5,7 +5,6 @@ import { computed } from 'vue'
 
 const emit = defineEmits<{
   ticket: []
-  clearMemory: []
 }>()
 
 const router = useRouter()
@@ -21,6 +20,7 @@ const adminLinks = [
 
 const isAdminRoute = computed(() => route.path.startsWith('/admin'))
 const isMyTasksActive = computed(() => route.name === 'my-tasks')
+const isMemoryActive = computed(() => route.name === 'user-memory')
 
 function goSettings() {
   router.push({ name: 'settings-account' })
@@ -32,6 +32,10 @@ function goHelp() {
 
 function goMyTasks() {
   router.push({ name: 'my-tasks' })
+}
+
+function goMemory() {
+  router.push({ name: 'user-memory' })
 }
 
 function goAdmin(path: string) {
@@ -52,9 +56,16 @@ function goAdmin(path: string) {
         >
           我的任务
         </button>
+        <button
+          type="button"
+          class="topbar-link"
+          :class="{ 'link-active': isMemoryActive }"
+          @click="goMemory"
+        >
+          长期记忆
+        </button>
         <button type="button" class="topbar-link" @click="goHelp">知识库帮助</button>
         <button type="button" class="topbar-link" @click="emit('ticket')">人工协助</button>
-        <button type="button" class="topbar-link" @click="emit('clearMemory')">清除记忆</button>
         <button type="button" class="topbar-link" @click="goSettings">设置</button>
 
         <template v-if="auth.isAdmin">

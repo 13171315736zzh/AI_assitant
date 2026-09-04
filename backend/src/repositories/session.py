@@ -200,3 +200,31 @@ class MessageRepository:
         await self.db.flush()
         await self.db.refresh(record)
         return record
+
+    async def update(self, record: MessageRecord, **fields) -> MessageRecord:
+        for key, value in fields.items():
+            if hasattr(record, key):
+                setattr(record, key, value)
+        await self.db.flush()
+        await self.db.refresh(record)
+        return record
+
+    async def find_workflow_plan_message(
+        self, session_id: str
+    ) -> MessageRecord | None:
+        messages, _ = await self.list_by_session(session_id, 1, 500)
+        for record in messages:
+            meta = record.metadata_json or {}
+            if isinstance(meta.get("workflow_plan"), dict):
+                return record
+        return None
+
+    async def find_task_message(
+        self, session_id: str, task_id: str
+    ) -> MessageRecord | None:
+        messages, _ = await self.list_by_session(session_id, 1, 500)
+        for record in reversed(messages):
+            meta = record.metadata_json or {}
+            if record.message_type == "task" and meta.get("task_id") == task_id:
+                return record
+        return None

@@ -4,8 +4,11 @@ import type { TaskCategory, TaskDisplayStatus, TaskSummary } from '@/types'
 const CATEGORY_LABELS: Record<TaskCategory, string> = {
   travel: '差旅办事',
   meeting: '会议预约',
+  gn_meeting: '国能会议',
   workpackage: '工时填报',
+  leave: '请假申请',
   email: '邮件撰写',
+  info_collect: '信息收集',
   other: '综合办事',
 }
 
@@ -15,13 +18,19 @@ const TOOL_TAGS: Record<string, string> = {
   hotel_book: '酒店预订',
   email_notify: '邮件通知',
   meeting_book: '会议预约',
+  gn_meeting_book: '国能会议',
   room_book: '会议室',
   workpackage_fill: '工时填报',
+  leave_apply: '请假申请',
+  info_collect_publish: '信息收集',
 }
 
 export function inferTaskCategory(steps: TaskStep[]): TaskCategory {
   const tools = new Set(steps.map((s) => s.tool))
+  if (tools.has('info_collect_publish')) return 'info_collect'
+  if (tools.has('leave_apply')) return 'leave'
   if (tools.has('workpackage_fill')) return 'workpackage'
+  if (tools.has('gn_meeting_book')) return 'gn_meeting'
   if (tools.has('meeting_book') || tools.has('room_book')) return 'meeting'
   if (tools.has('travel_apply') || tools.has('flight_book') || tools.has('hotel_book')) {
     return 'travel'
@@ -84,8 +93,11 @@ export function buildTaskSummary(task: Task): TaskSummary {
 export const CATEGORY_ICONS: Record<TaskCategory, string> = {
   travel: '✈️',
   meeting: '📅',
+  gn_meeting: '🎥',
   workpackage: '📊',
+  leave: '🏖️',
   email: '✉️',
+  info_collect: '📝',
   other: '📋',
 }
 

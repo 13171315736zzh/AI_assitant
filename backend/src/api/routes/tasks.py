@@ -8,14 +8,13 @@ from src.api.responses import error, paginated, success
 from src.db.session import get_db
 from src.models.task import TaskConfirmRequest, TaskStepUpdateRequest
 from src.models.user import UserPublic
-from src.repositories.task import TaskRepository
 from src.services.task import TaskService
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 
 def _service(db: AsyncSession) -> TaskService:
-    return TaskService(TaskRepository(db))
+    return TaskService(db)
 
 
 @router.get("")
@@ -93,3 +92,35 @@ async def update_task_step(
     if task is None:
         return JSONResponse(status_code=404, content=error("任务或步骤不存在", code=404))
     return success(task.model_dump())
+
+
+@router.post("/{task_id}/oa-submit")
+async def submit_oa_application(
+    task_id: str,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    result = await svc.submit_oa_application(current_user.id, task_id)
+    if result is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法提交 OA 申请，请确认任务与表单有效", code=400),
+        )
+    return success(result.model_dump())
+
+
+@router.post("/{task_id}/oa-approve")
+async def approve_oa_application(
+    task_id: str,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    result = await svc.approve_oa_application(current_user.id, task_id)
+    if result is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法完成 OA 审批，请确认任务与表单有效", code=400),
+        )
+    return success(result.model_dump())

@@ -11,13 +11,23 @@ const emit = defineEmits<{
   confirm: [payload: { room: string }]
 }>()
 
+const preferredRooms = ['235', '236', '240']
+
 const selectedRoom = ref<string | null>(
-  props.selection.options.find((o) => o.room === '235')?.room
+  props.selection.options.find((o) => preferredRooms.includes(o.room))?.room
     ?? props.selection.options[0]?.room
     ?? null,
 )
 
 const isPending = computed(() => props.selection.status === 'pending')
+const isBrowseMode = computed(() => Boolean(props.selection.browse_mode))
+const sectionTitle = computed(() => {
+  if (isBrowseMode.value) {
+    const equip = props.selection.equipment_pref || '投屏'
+    return `可选会议室（${equip} · ${props.selection.time_label}）`
+  }
+  return `推荐可用会议室（${props.selection.time_label}）`
+})
 
 function selectRoom(room: string) {
   if (!isPending.value) return
@@ -34,15 +44,15 @@ function handleConfirm() {
   <div class="room-picker" :class="{ confirmed: !isPending }">
     <div class="picker-banner">
       <span class="picker-banner-icon" aria-hidden="true">☑</span>
-      <span>请直接点击勾选 · 选择可用会议室</span>
+      <span>{{ isBrowseMode ? '请点选符合条件的会议室' : '请直接点击勾选 · 选择可用会议室' }}</span>
     </div>
 
-    <div v-if="selection.conflict_reason" class="conflict-box">
+    <div v-if="selection.conflict_reason && !isBrowseMode" class="conflict-box">
       {{ selection.conflict_reason }}
     </div>
 
     <section class="picker-section">
-      <h4 class="section-title">推荐可用会议室（{{ selection.time_label }}）</h4>
+      <h4 class="section-title">{{ sectionTitle }}</h4>
       <div class="option-list">
         <button
           v-for="opt in selection.options"

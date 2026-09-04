@@ -8,6 +8,10 @@ import {
   taskFieldValue,
 } from '@/utils/taskFieldLabels'
 import { isTravelTask, openOaTravelApply } from '@/utils/oaTravel'
+import { isWorkpackageTask, openOaWorkpackageApply } from '@/utils/oaWorkpackage'
+import { isLeaveTask, openOaLeaveApply } from '@/utils/oaLeave'
+import { isGnMeetingTask, isRoomBookingTask, openOaGnMeetingApply, openOaRoomMeetingApply } from '@/utils/oaMeeting'
+import { useOaTaskSync } from '@/composables/useOaTaskSync'
 
 const props = defineProps<{ taskId: string }>()
 
@@ -32,6 +36,12 @@ async function load() {
 
 watch(() => props.taskId, load, { immediate: true })
 
+useOaTaskSync((payload) => {
+  if (payload.taskId === props.taskId) {
+    void load()
+  }
+})
+
 function stepIcon(status: TaskStep['status']) {
   if (status === 'completed') return '✅'
   if (status === 'running') return '🔄'
@@ -50,15 +60,53 @@ async function handleCancel() {
   if (res.code === 200) await load()
 }
 
+function oaFormLinkLabel(step: TaskStep): string {
+  if (step.tool === 'workpackage_fill') return '查看工时填报单 →'
+  if (step.tool === 'travel_apply') return '查看差旅申请单 →'
+  if (step.tool === 'leave_apply') return '查看请假申请单 →'
+  if (step.tool === 'meeting_book') return '查看会议室预约单 →'
+  if (step.tool === 'gn_meeting_book') return '查看国能会议预约单 →'
+  return '查看业务表单 →'
+}
+
 async function handleConfirm() {
   if (!task.value) return
   const res = await confirmTask(props.taskId, task.value.current_step)
   if (res.code !== 200) return
   await load()
-  if (task.value && isTravelTask(task.value)) {
+  if (!task.value) return
+  if (isTravelTask(task.value)) {
     const opened = openOaTravelApply(props.taskId)
     if (!opened) {
       alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 差旅申请页。')
+    }
+    return
+  }
+  if (isWorkpackageTask(task.value)) {
+    const opened = openOaWorkpackageApply(props.taskId)
+    if (!opened) {
+      alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 工时填报页。')
+    }
+    return
+  }
+  if (isLeaveTask(task.value)) {
+    const opened = openOaLeaveApply(props.taskId)
+    if (!opened) {
+      alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 请假申请页。')
+    }
+    return
+  }
+  if (isGnMeetingTask(task.value)) {
+    const opened = openOaGnMeetingApply(props.taskId)
+    if (!opened) {
+      alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 国能会议页。')
+    }
+    return
+  }
+  if (isRoomBookingTask(task.value)) {
+    const opened = openOaRoomMeetingApply(props.taskId)
+    if (!opened) {
+      alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 会议室预约页。')
     }
   }
 }
@@ -134,7 +182,7 @@ function openFormFromStep(step: TaskStep) {
                 class="link-btn"
                 @click="openFormFromStep(step)"
               >
-                查看差旅申请单 →
+                {{ oaFormLinkLabel(step) }}
               </button>
             </div>
           </div>
@@ -142,7 +190,15 @@ function openFormFromStep(step: TaskStep) {
       </div>
 
       <footer class="panel-footer">
-        <button type="button" class="btn-danger" @click="handleCancel">取消任务</button>
+        <p v-if="task.status === 'completed'" class="completed-hint">任务已完成，OA 审批结果已同步。</p>
+        <button
+          v-if="task.status !== 'completed' && task.status !== 'cancelled'"
+          type="button"
+          class="btn-danger"
+          @click="handleCancel"
+        >
+          取消任务
+        </button>
         <button
           v-if="task.status === 'running'"
           type="button"
@@ -338,10 +394,18 @@ function openFormFromStep(step: TaskStep) {
 
 .panel-footer {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   padding: 16px 20px;
   border-top: 1px solid var(--border);
   flex-shrink: 0;
+}
+
+.completed-hint {
+  width: 100%;
+  margin: 0;
+  font-size: 13px;
+  color: #059669;
 }
 
 .btn-danger {

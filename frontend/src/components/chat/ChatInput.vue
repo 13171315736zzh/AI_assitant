@@ -1,6 +1,4 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-
 defineProps<{
   disabled?: boolean
   sending?: boolean
@@ -10,7 +8,7 @@ const emit = defineEmits<{
   send: [content: string]
 }>()
 
-const text = ref('')
+const text = defineModel<string>({ default: '' })
 
 function submit() {
   if (!text.value.trim()) return

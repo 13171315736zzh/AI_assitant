@@ -7,8 +7,14 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agent.session_context import (
+    extend_user_messages,
+    has_pending_plan,
+    load_session_context,
+)
 from src.agent.travel_workflow import (
     TravelPlan,
+    apply_memory_travel_hints,
     build_booking_selection_content,
     build_booking_selection_metadata,
     build_execution_summary,
@@ -17,17 +23,30 @@ from src.agent.travel_workflow import (
     build_travel_plan_confirm_content,
     build_travel_plan_confirm_metadata,
     is_ready_to_execute,
-    is_travel_workflow_intent,
+    is_travel_plan_update,
+    is_travel_workflow_intent_with_memory,
 )
-from src.agent.workflow_confirm import get_pending_meta, is_meta_confirmed, mark_meta_confirmed
+from src.agent.workflow_confirm import (
+    get_pending_meta,
+    is_meta_confirmed,
+    mark_meta_confirmed,
+    mark_meta_superseded,
+)
+from src.agent.workflow_plan import (
+    get_workflow_plan_from_session,
+    link_task_to_plan,
+    node_ids_for_travel_task,
+)
 from src.db.task_models import TaskRecord
 from src.integrations.mock_travel_provider import query_travel_bookings
 from src.repositories.form import FormRepository
 from src.repositories.session import MessageRepository
 from src.repositories.task import TaskRepository
 from src.repositories.user import UserRepository
+from src.repositories.user_settings import UserSettingsRepository
 from src.services.form import FormService
 from src.services.project_mapping import ProjectMappingService
+from src.services.settings import SettingsService
 
 
 def _new_task_id() -> str:
@@ -49,6 +68,8 @@ class TravelWorkflowService:
         session_id: str,
         user_content: str,
         staff_level: str | None = None,
+        *,
+        card_draft: dict | None = None,
     ) -> tuple[str, str, dict] | None:
         user = await self.user_repo.get_by_id(user_id)
         if user is None:
@@ -56,17 +77,34 @@ class TravelWorkflowService:
 
         from types import SimpleNamespace
 
-        history = await self.message_repo.list_recent_for_context(session_id, limit=40)
-        full_history = list(history) + [SimpleNamespace(role="user", content=user_content)]
-
-        combined_check = " ".join(
-            m.content for m in full_history if m.role == "user"
+        ctx = await load_session_context(
+            self.message_repo, session_id, user_content=user_content
         )
-        if not is_travel_workflow_intent(combined_check):
-            return None
+        full_history = ctx.user_messages
+        structured = await SettingsService(
+            UserSettingsRepository(self.db), self.user_repo
+        ).get_user_structured_memory(user_id)
 
-        plan = build_travel_plan(full_history, staff_level=staff_level)
-        await self._apply_project_mapping(plan, combined_check)
+        if not is_travel_workflow_intent_with_memory(ctx.combined_text, structured):
+            pending_plan_msg, pending_plan = await get_pending_meta(
+                self.message_repo, session_id, "travel_plan_confirm"
+            )
+            if not (has_pending_plan(pending_plan) and is_travel_plan_update(user_content)):
+                return None
+        else:
+            pending_plan_msg, pending_plan = await get_pending_meta(
+                self.message_repo, session_id, "travel_plan_confirm"
+            )
+
+        has_pending_plan_flag = has_pending_plan(pending_plan)
+
+        plan = build_travel_plan(
+            full_history,
+            staff_level=staff_level,
+            memory_structured=structured,
+        )
+        plan = apply_memory_travel_hints(plan, structured, ctx.combined_text)
+        await self._apply_project_mapping(plan, ctx.merged_text)
 
         if not is_ready_to_execute(plan):
             return None
@@ -74,15 +112,9 @@ class TravelWorkflowService:
         if not plan.trip_days and (plan.needs_transport or plan.needs_hotel):
             plan.trip_days = 1
 
-        pending_plan_msg, pending_plan = await get_pending_meta(
-            self.message_repo, session_id, "travel_plan_confirm"
-        )
-        if pending_plan_msg and pending_plan:
-            return (
-                "👇 请核对出差信息并点击「确认开始办理」。",
-                "text",
-                {"interactive": True, "travel_plan_confirm": pending_plan},
-            )
+        if pending_plan_msg and has_pending_plan_flag:
+            mark_meta_superseded(pending_plan_msg, "travel_plan_confirm")
+            await self.db.flush()
 
         plan_confirmed = await is_meta_confirmed(
             self.message_repo, session_id, "travel_plan_confirm"
@@ -102,7 +134,9 @@ class TravelWorkflowService:
             )
 
         if not plan_confirmed:
-            content = build_travel_plan_confirm_content(plan)
+            content = build_travel_plan_confirm_content(
+                plan, updated=has_pending_plan_flag
+            )
             metadata = build_travel_plan_confirm_metadata(plan)
             return content, "text", metadata
 
@@ -122,6 +156,8 @@ class TravelWorkflowService:
         user_id: int,
         session_id: str,
         staff_level: str | None = None,
+        *,
+        supplementary_content: str | None = None,
     ) -> tuple[str, str, dict] | None:
         user = await self.user_repo.get_by_id(user_id)
         if user is None:
@@ -133,10 +169,20 @@ class TravelWorkflowService:
         if pending_msg is None or pending is None:
             return None
 
-        history = await self.message_repo.list_recent_for_context(session_id, limit=40)
-        combined = " ".join(m.content for m in history if m.role == "user")
-        plan = build_travel_plan(history, staff_level=staff_level)
-        await self._apply_project_mapping(plan, combined)
+        ctx = await load_session_context(self.message_repo, session_id)
+        structured = await SettingsService(
+            UserSettingsRepository(self.db), self.user_repo
+        ).get_user_structured_memory(user_id)
+        user_messages = extend_user_messages(ctx.user_messages, supplementary_content)
+        plan = build_travel_plan(
+            user_messages,
+            staff_level=staff_level,
+            memory_structured=structured,
+        )
+        merge_text = ctx.merged_text
+        if supplementary_content:
+            merge_text = f"{merge_text}\n{supplementary_content.strip()}"
+        await self._apply_project_mapping(plan, merge_text)
         if not is_ready_to_execute(plan):
             return None
 
@@ -171,10 +217,16 @@ class TravelWorkflowService:
         if user is None:
             return None
 
-        history = await self.message_repo.list_recent_for_context(session_id, limit=40)
-        combined = " ".join(m.content for m in history if m.role == "user")
-        plan = build_travel_plan(history, staff_level=staff_level)
-        await self._apply_project_mapping(plan, combined)
+        ctx = await load_session_context(self.message_repo, session_id)
+        structured = await SettingsService(
+            UserSettingsRepository(self.db), self.user_repo
+        ).get_user_structured_memory(user_id)
+        plan = build_travel_plan(
+            ctx.user_messages,
+            staff_level=staff_level,
+            memory_structured=structured,
+        )
+        await self._apply_project_mapping(plan, ctx.merged_text)
         if not is_ready_to_execute(plan):
             return None
 
@@ -270,6 +322,24 @@ class TravelWorkflowService:
                     step["result"] = {"form_id": travel_form.form_id, "receipt_id": "TA-PENDING"}
 
         await self.task_repo.update(task, steps_json=steps, current_step=2)
+
+        wf_plan = await get_workflow_plan_from_session(self.message_repo, session_id)
+        extra_nodes = [
+            node_id
+            for node_id in node_ids_for_travel_task(
+                wf_plan, plan.needs_transport, plan.needs_hotel
+            )
+            if node_id != "travel"
+        ]
+        if plan.needs_email:
+            extra_nodes.append("email")
+        await link_task_to_plan(
+            self.message_repo,
+            session_id,
+            task_id,
+            category="travel",
+            extra_node_ids=extra_nodes,
+        )
 
         content = build_execution_summary(
             plan, user.display_name, task_id, booking=booking

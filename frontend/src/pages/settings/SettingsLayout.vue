@@ -8,7 +8,6 @@ const navItems = [
   { name: 'settings-theme', label: '外观主题', path: '/settings/theme' },
   { name: 'settings-account', label: '账号管理', path: '/settings/account' },
   { name: 'settings-version', label: '版本升级', path: '/settings/version' },
-  { name: 'settings-memory', label: '记忆设置', path: '/settings/memory' },
 ]
 
 const activeName = computed(() => route.name as string)

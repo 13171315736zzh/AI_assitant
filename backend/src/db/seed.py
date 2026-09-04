@@ -209,18 +209,20 @@ async def seed_user_settings() -> None:
         demo_memory_items = [
             {"key": "常用出差目的地", "value": "鄂尔多斯、北京"},
             {"key": "常用联系人", "value": "李经理（工包审批）"},
-            {"key": "默认部门", "value": "神东煤炭集团"},
             {"key": "沟通偏好", "value": "简洁回复，优先表格展示"},
             {"key": "差旅偏好", "value": "优先下午航班，经济舱"},
         ]
         demo_structured = {
+            "display_name": "张明",
             "employee_id": "0176338",
             "department": "神东煤炭集团",
-            "position": "员工",
+            "position": "其他人员",
             "email": "zhangming@ceic.com",
-            "travel_mode_preference": "经济舱",
+            "travel_mode_preference": "高铁",
             "related_projects": ["神东能源数据治理平台"],
-            "gender": "unknown",
+            "gender": "男",
+            "id_number": "",
+            "base_location": "北京",
         }
 
         for username, _, display_name, role, employee_id in SEED_ACCOUNTS:
@@ -258,7 +260,7 @@ async def seed_user_settings() -> None:
                     "department": "",
                     "position": "员工",
                     "email": "",
-                    "travel_mode_preference": "经济舱",
+                    "travel_mode_preference": "高铁",
                     "related_projects": [],
                     "gender": "unknown",
                 }
@@ -452,6 +454,17 @@ async def seed_project_mappings() -> None:
                 district="",
                 address="神东能源大厦",
                 policy_city="鄂尔多斯",
+                remark="",
+                updated_by="admin",
+            ),
+            ProjectMappingRecord(
+                id="proj_ningmei",
+                project_name="宁煤智能化建设项目",
+                aliases="宁煤,宁煤项目,宁夏煤业",
+                city="银川",
+                district="",
+                address="宁东能源化工基地",
+                policy_city="银川",
                 remark="",
                 updated_by="admin",
             ),

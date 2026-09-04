@@ -7,7 +7,26 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.agent.workflow_confirm import get_pending_meta, is_meta_confirmed, mark_meta_confirmed
+from src.agent.workflow_confirm import (
+    get_pending_meta,
+    is_meta_confirmed,
+    mark_meta_confirmed,
+    mark_meta_superseded,
+)
+from src.agent.workflow_plan import link_task_to_plan
+from src.agent.workflow_queue import (
+    attach_workflow_queue,
+    detect_workflow_intents,
+    get_pending_workflow_queue,
+    multi_intent_preamble,
+)
+from src.agent.leave_workflow import (
+    build_leave_plan,
+    build_leave_plan_confirm_content,
+    build_leave_plan_confirm_metadata,
+    is_ready_to_execute as is_leave_ready_to_execute,
+)
+from src.agent.session_context import extend_user_messages, has_pending_plan, load_session_context, merge_user_texts
 from src.agent.workpackage_workflow import (
     WorkpackagePlan,
     apply_project_options,
@@ -18,7 +37,10 @@ from src.agent.workpackage_workflow import (
     build_workpackage_plan,
     build_workpackage_plan_confirm_content,
     build_workpackage_plan_confirm_metadata,
+    can_auto_submit,
+    has_resolved_period,
     is_ready_to_execute,
+    is_workpackage_plan_update,
     is_workpackage_workflow_intent,
     needs_project_selection,
     normalize_workpackage_plan,
@@ -26,15 +48,41 @@ from src.agent.workpackage_workflow import (
 from src.db.task_models import TaskRecord
 from src.integrations.mock_timesheet_provider import query_weekly_fill_plan
 from src.repositories.form import FormRepository
+from src.repositories.project_mapping import ProjectMappingRepository
 from src.repositories.session import MessageRepository
 from src.repositories.task import TaskRepository
 from src.repositories.user import UserRepository
 from src.repositories.user_settings import UserSettingsRepository
 from src.services.form import FormService
+from src.services.project_mapping import ProjectMappingService
 
 
 def _new_task_id() -> str:
     return f"task_{secrets.token_hex(4)}"
+
+
+def _workpackage_card_payload(card_draft: dict | None) -> dict:
+    if not card_draft or card_draft.get("meta_key") != "workpackage_plan_confirm":
+        return {}
+    payload = card_draft.get("payload")
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _apply_workpackage_card(plan: WorkpackagePlan, payload: dict) -> None:
+    """卡片非空字段覆盖对话/输入框解析结果。"""
+    if not payload:
+        return
+    project = str(payload.get("project") or "").strip()
+    if project:
+        plan.project = project
+    if payload.get("all_days_eight_hours") is True:
+        plan.all_days_eight_hours = True
+        plan.hours_per_day = 8.0
+        plan.hours_confirmed = True
+    elif payload.get("all_days_eight_hours") is False and payload.get("hours_per_day") is not None:
+        plan.all_days_eight_hours = False
+        plan.hours_per_day = float(payload["hours_per_day"])
+        plan.hours_confirmed = True
 
 
 class WorkpackageWorkflowService:
@@ -76,10 +124,31 @@ class WorkpackageWorkflowService:
                         seen.add(entry_project)
                         options.append(entry_project)
 
+        mapping_repo = ProjectMappingRepository(self.db)
+        for mapping in await mapping_repo.list_all():
+            project = (mapping.project_name or "").strip()
+            if project and project not in seen:
+                seen.add(project)
+                options.append(project)
+
         return options
 
-    async def _build_plan(self, history, user_id: int) -> WorkpackagePlan:
-        plan = normalize_workpackage_plan(build_workpackage_plan(history))
+    async def _apply_project_mapping(self, plan: WorkpackagePlan, text: str) -> None:
+        resolved = await ProjectMappingService(self.db).resolve_from_text(text)
+        if resolved:
+            plan.project = resolved.project_name
+            plan.project_from_mapping = True
+
+    async def _build_plan(self, user_messages, user_id: int) -> WorkpackagePlan:
+        combined = merge_user_texts(
+            [
+                message.content.strip()
+                for message in user_messages
+                if getattr(message, "role", None) == "user" and message.content.strip()
+            ]
+        )
+        plan = normalize_workpackage_plan(build_workpackage_plan(user_messages))
+        await self._apply_project_mapping(plan, combined)
         options = await self._collect_project_options(user_id)
         return apply_project_options(plan, options)
 
@@ -91,38 +160,97 @@ class WorkpackageWorkflowService:
             date_start=plan.date_start,
             date_end=plan.date_end,
             hours_per_day=plan.hours_per_day,
+            leave_slots=plan.leave_slots,
+            full_week=plan.full_week,
         )
+        plan.fill_days = snapshot.fillable_days
         return snapshot.to_public_dict()
+
+    def _apply_multi_intent(
+        self,
+        content: str,
+        metadata: dict | None,
+        combined_text: str,
+        *,
+        active: str = "workpackage",
+    ) -> tuple[str, dict]:
+        intents = detect_workflow_intents(combined_text)
+        meta = dict(metadata or {})
+        preamble = multi_intent_preamble(intents)
+        if preamble:
+            content = f"{preamble}\n\n{content}"
+        meta = attach_workflow_queue(meta, intents, active)
+        return content, meta
+
+    async def _maybe_chain_leave_confirm(
+        self,
+        session_id: str,
+        content: str,
+        metadata: dict,
+    ) -> tuple[str, dict]:
+        queue = await get_pending_workflow_queue(self.message_repo, session_id)
+        if "leave" not in queue:
+            return content, metadata
+
+        ctx = await load_session_context(self.message_repo, session_id)
+        leave_plan = build_leave_plan(ctx.user_messages)
+        if not is_leave_ready_to_execute(leave_plan):
+            return content, metadata
+
+        leave_meta = build_leave_plan_confirm_metadata(leave_plan)
+        leave_intro = build_leave_plan_confirm_content(leave_plan)
+        merged = dict(metadata)
+        merged.update(leave_meta)
+        merged["interactive"] = True
+        merged.pop("workflow_queue", None)
+        chained_content = (
+            f"{content}\n\n---\n\n接下来为您办理请假申请：\n\n"
+            f"{leave_intro.split('：', 1)[-1]}"
+        )
+        return chained_content, merged
 
     async def try_execute(
         self,
         user_id: int,
         session_id: str,
         user_content: str,
+        *,
+        card_draft: dict | None = None,
     ) -> tuple[str, str, dict] | None:
-        history = await self.message_repo.list_recent_for_context(session_id, limit=40)
-        from types import SimpleNamespace
-
-        full_history = list(history) + [SimpleNamespace(role="user", content=user_content)]
-        combined = " ".join(m.content for m in full_history if m.role == "user")
-        if not is_workpackage_workflow_intent(combined):
-            return None
-
-        plan = await self._build_plan(full_history, user_id)
-        if not plan.fill_days and plan.period_hint != "本周":
-            return None
-        if plan.period_hint != "本周" and not plan.project and not plan.project_options:
-            return None
+        ctx = await load_session_context(
+            self.message_repo, session_id, user_content=user_content
+        )
 
         pending_plan_msg, pending_plan = await get_pending_meta(
             self.message_repo, session_id, "workpackage_plan_confirm"
         )
-        if pending_plan_msg and pending_plan:
-            return (
-                "👇 请核对工时填报信息并点击「确认开始办理」。",
-                "text",
-                {"interactive": True, "workpackage_plan_confirm": pending_plan},
+        has_pending_plan_flag = has_pending_plan(pending_plan)
+        card_payload = _workpackage_card_payload(card_draft)
+
+        if not is_workpackage_workflow_intent(ctx.combined_text):
+            if not (
+                has_pending_plan_flag
+                and (is_workpackage_plan_update(user_content) or card_payload)
+            ):
+                return None
+
+        plan = await self._build_plan(ctx.user_messages, user_id)
+        _apply_workpackage_card(plan, card_payload)
+        if plan.fill_days is None and not has_resolved_period(plan):
+            return None
+        if not has_resolved_period(plan) and not plan.project and not plan.project_options:
+            return None
+
+        if can_auto_submit(plan):
+            pending_fill_msg, _ = await get_pending_meta(
+                self.message_repo, session_id, "workpackage_confirm"
             )
+            if not has_pending_plan_flag and pending_fill_msg is None:
+                fill_plan = await self._query_fill_plan(plan)
+                if fill_plan.get("entries"):
+                    return await self._create_task_reply(
+                        user_id, session_id, plan, fill_plan
+                    )
 
         plan_confirmed = await is_meta_confirmed(
             self.message_repo, session_id, "workpackage_plan_confirm"
@@ -139,14 +267,27 @@ class WorkpackageWorkflowService:
             )
 
         if not plan_confirmed:
-            if plan.period_hint == "本周" or needs_project_selection(plan):
-                content = build_workpackage_plan_confirm_content(plan)
+            if has_pending_plan_flag:
+                mark_meta_superseded(pending_plan_msg, "workpackage_plan_confirm")
+                await self.db.flush()
+            if has_resolved_period(plan) or needs_project_selection(plan):
+                content = build_workpackage_plan_confirm_content(
+                    plan, updated=has_pending_plan_flag
+                )
                 metadata = build_workpackage_plan_confirm_metadata(plan)
+                content, metadata = self._apply_multi_intent(
+                    content, metadata, ctx.combined_text
+                )
                 return content, "text", metadata
             if not is_ready_to_execute(plan):
                 return None
-            content = build_workpackage_plan_confirm_content(plan)
+            content = build_workpackage_plan_confirm_content(
+                plan, updated=has_pending_plan_flag
+            )
             metadata = build_workpackage_plan_confirm_metadata(plan)
+            content, metadata = self._apply_multi_intent(
+                content, metadata, ctx.combined_text
+            )
             return content, "text", metadata
 
         if await is_meta_confirmed(self.message_repo, session_id, "workpackage_confirm"):
@@ -166,6 +307,9 @@ class WorkpackageWorkflowService:
         session_id: str,
         *,
         project: str | None = None,
+        all_days_eight_hours: bool | None = None,
+        hours_per_day: float | None = None,
+        supplementary_content: str | None = None,
     ) -> tuple[str, str, dict] | None:
         pending_msg, pending = await get_pending_meta(
             self.message_repo, session_id, "workpackage_plan_confirm"
@@ -173,10 +317,21 @@ class WorkpackageWorkflowService:
         if pending_msg is None or pending is None:
             return None
 
-        history = await self.message_repo.list_recent_for_context(session_id, limit=40)
-        plan = await self._build_plan(history, user_id)
+        ctx = await load_session_context(self.message_repo, session_id)
+        user_messages = extend_user_messages(ctx.user_messages, supplementary_content)
+        plan = await self._build_plan(user_messages, user_id)
+        card_payload = {
+            key: value
+            for key, value in {
+                "project": project,
+                "all_days_eight_hours": all_days_eight_hours,
+                "hours_per_day": hours_per_day,
+            }.items()
+            if value is not None
+        }
+        _apply_workpackage_card(plan, card_payload)
 
-        selected = (project or pending.get("selected_project") or plan.project or "").strip()
+        selected = (plan.project or pending.get("selected_project") or "").strip()
         if not selected:
             options = pending.get("project_options") or plan.project_options
             if len(options) == 1:
@@ -185,10 +340,16 @@ class WorkpackageWorkflowService:
             return None
         plan.project = selected
 
+        if not plan.hours_confirmed:
+            return None
+
         if pending_msg.metadata_json:
             meta = dict(pending_msg.metadata_json)
             confirm = dict(meta.get("workpackage_plan_confirm") or {})
             confirm["selected_project"] = selected
+            confirm["hours_per_day"] = plan.hours_per_day
+            confirm["hours_confirmed"] = plan.hours_confirmed
+            confirm["all_days_eight_hours"] = plan.all_days_eight_hours
             confirm["items"] = build_workpackage_plan_confirm_metadata(plan)[
                 "workpackage_plan_confirm"
             ]["items"]
@@ -221,8 +382,8 @@ class WorkpackageWorkflowService:
         ):
             return None
 
-        history = await self.message_repo.list_recent_for_context(session_id, limit=40)
-        plan = await self._build_plan(history, user_id)
+        ctx = await load_session_context(self.message_repo, session_id)
+        plan = await self._build_plan(ctx.user_messages, user_id)
         pending_project = str(pending.get("project") or "").strip()
         if pending_project:
             plan.project = pending_project
@@ -322,8 +483,18 @@ class WorkpackageWorkflowService:
 
         await self.task_repo.update(task, steps_json=steps, current_step=1)
 
+        await link_task_to_plan(
+            self.message_repo,
+            session_id,
+            task_id,
+            category="workpackage",
+        )
+
         content = build_execution_summary(plan, task_id, fill_plan)
         metadata = build_task_metadata(plan, task_id)
+        content, metadata = await self._maybe_chain_leave_confirm(
+            session_id, content, metadata
+        )
         return content, "task", metadata
 
     async def _mark_confirmed(self, message_record) -> None:

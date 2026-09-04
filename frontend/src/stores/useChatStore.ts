@@ -15,13 +15,20 @@ import {
   confirmWorkpackageFill,
   confirmTravelPlan,
   confirmMeetingPlan,
+  confirmLeavePlan,
+  confirmInfoCollectPlan,
 } from '@/services/sessionService'
 import { fetchWelcomeMessage } from '@/services/settingsService'
 import { DEFAULT_WELCOME_TEXT } from '@/constants/welcomeQuickActions'
+import {
+  findPendingWorkflowCard,
+  type WorkflowCardDraft,
+} from '@/utils/workflowCardDraft'
 import { useAuthStore } from './useAuthStore'
 
 const DEFAULT_WELCOME = DEFAULT_WELCOME_TEXT
 const WELCOME_MESSAGE_ID = '__welcome__'
+const NEW_SESSION_DRAFT_KEY = '__new__'
 
 export const useChatStore = defineStore('chat', () => {
   const sessions = ref<Session[]>([])
@@ -32,12 +39,68 @@ export const useChatStore = defineStore('chat', () => {
   const sending = ref(false)
   const deletingSessionId = ref<string | null>(null)
   const workflowSubmitting = ref(false)
+  const inputDrafts = ref<Record<string, string>>({})
+  const workflowCardDrafts = ref<Record<string, WorkflowCardDraft>>({})
 
   const activeSession = computed(() =>
     sessions.value.find((s) => s.id === activeSessionId.value) ?? null,
   )
 
   const isActiveSessionEnded = computed(() => activeSession.value?.status === 'ended')
+
+  const activeInputDraft = computed({
+    get() {
+      const key = activeSessionId.value ?? NEW_SESSION_DRAFT_KEY
+      return inputDrafts.value[key] ?? ''
+    },
+    set(value: string) {
+      const key = activeSessionId.value ?? NEW_SESSION_DRAFT_KEY
+      const next = { ...inputDrafts.value }
+      if (!value) {
+        delete next[key]
+      } else {
+        next[key] = value
+      }
+      inputDrafts.value = next
+    },
+  })
+
+  function clearInputDraft(sessionId: string) {
+    if (!(sessionId in inputDrafts.value)) return
+    const next = { ...inputDrafts.value }
+    delete next[sessionId]
+    inputDrafts.value = next
+  }
+
+  function setWorkflowCardDraft(draft: WorkflowCardDraft) {
+    workflowCardDrafts.value = {
+      ...workflowCardDrafts.value,
+      [`${draft.messageId}:${draft.metaKey}`]: draft,
+    }
+  }
+
+  function getActiveWorkflowCardDraft(): WorkflowCardDraft | null {
+    const pending = findPendingWorkflowCard(messages.value)
+    if (!pending) return null
+    return workflowCardDrafts.value[`${pending.messageId}:${pending.metaKey}`] ?? null
+  }
+
+  function takeSupplementaryInput(): string {
+    const sessionId = activeSessionId.value
+    if (!sessionId) return ''
+    const text = activeInputDraft.value.trim()
+    if (text) clearInputDraft(sessionId)
+    return text
+  }
+
+  function migrateNewSessionDraft(sessionId: string) {
+    const pendingDraft = inputDrafts.value[NEW_SESSION_DRAFT_KEY]
+    if (!pendingDraft) return
+    const next = { ...inputDrafts.value }
+    delete next[NEW_SESSION_DRAFT_KEY]
+    next[sessionId] = pendingDraft
+    inputDrafts.value = next
+  }
 
   const displayMessages = computed(() => {
     if (messages.value.length > 0) return messages.value
@@ -99,6 +162,8 @@ export const useChatStore = defineStore('chat', () => {
     sessions.value = []
     activeSessionId.value = null
     messages.value = []
+    inputDrafts.value = {}
+    workflowCardDrafts.value = {}
     loading.value = false
     sending.value = false
   }
@@ -126,6 +191,7 @@ export const useChatStore = defineStore('chat', () => {
     }
     sessions.value.unshift(res.data)
     activeSessionId.value = res.data.id
+    migrateNewSessionDraft(res.data.id)
     messages.value = []
     await loadWelcomeMessage()
     return true
@@ -149,6 +215,7 @@ export const useChatStore = defineStore('chat', () => {
         throw new Error(res.message || '删除失败')
       }
       sessions.value = sessions.value.filter((s) => s.id !== sessionId)
+      clearInputDraft(sessionId)
       if (activeSessionId.value === sessionId) {
         activeSessionId.value = sessions.value[0]?.id ?? null
         messages.value = []
@@ -176,7 +243,8 @@ export const useChatStore = defineStore('chat', () => {
       if (!created || !activeSessionId.value) return
     }
 
-    const sessionId = activeSessionId.value
+    const sessionId = activeSessionId.value!
+    clearInputDraft(sessionId)
     const tempUserId = `temp_u_${Date.now()}`
     const pendingId = `temp_pending_${Date.now()}`
     const now = new Date().toISOString()
@@ -203,6 +271,7 @@ export const useChatStore = defineStore('chat', () => {
 
     sending.value = true
     try {
+      const cardDraft = getActiveWorkflowCardDraft()
       await sendMessageStream(sessionId, trimmed, {
         onUser: (userMessage) => {
           const idx = messages.value.findIndex((m) => m.id === tempUserId)
@@ -256,7 +325,7 @@ export const useChatStore = defineStore('chat', () => {
           messages.value = messages.value.filter((m) => m.id !== pendingId)
           alert(message)
         },
-      })
+      }, { cardDraft })
     } finally {
       sending.value = false
     }
@@ -290,21 +359,117 @@ export const useChatStore = defineStore('chat', () => {
     )
   }
 
-  async function confirmWorkpackagePlanAction(payload: { messageId: string; project?: string }) {
+  async function confirmWorkpackagePlanAction(payload: {
+    messageId: string
+    project?: string
+    all_days_eight_hours?: boolean
+    hours_per_day?: number
+  }) {
+    const supplementary = takeSupplementaryInput()
+    const draft = workflowCardDrafts.value[`${payload.messageId}:workpackage_plan_confirm`]
+    const draftPayload = draft?.payload ?? {}
     await _confirmWorkflow(payload.messageId, 'workpackage_plan_confirm', () =>
-      confirmWorkpackagePlan(activeSessionId.value!, { project: payload.project }),
+      confirmWorkpackagePlan(activeSessionId.value!, {
+        project: payload.project ?? (draftPayload.project as string | undefined),
+        all_days_eight_hours:
+          payload.all_days_eight_hours
+          ?? (draftPayload.all_days_eight_hours as boolean | undefined),
+        hours_per_day:
+          payload.hours_per_day ?? (draftPayload.hours_per_day as number | undefined),
+        supplementary_content: supplementary || undefined,
+      }),
     )
   }
 
   async function confirmTravelPlanAction(payload: { messageId: string }) {
+    const supplementary = takeSupplementaryInput()
     await _confirmWorkflow(payload.messageId, 'travel_plan_confirm', () =>
-      confirmTravelPlan(activeSessionId.value!),
+      confirmTravelPlan(activeSessionId.value!, {
+        supplementary_content: supplementary || undefined,
+      }),
     )
   }
 
-  async function confirmMeetingPlanAction(payload: { messageId: string }) {
+  async function confirmMeetingPlanAction(payload: {
+    messageId: string
+    supplementary_content?: string
+    subject?: string
+    room?: string | null
+    room_flexible?: boolean
+    attendees?: string
+    date_hint?: string
+    start_hint?: string
+    end_hint?: string
+  }) {
+    const inputExtra = takeSupplementaryInput()
+    const draft = workflowCardDrafts.value[`${payload.messageId}:meeting_plan_confirm`]
+    const draftPayload = draft?.payload ?? {}
+    const supplementaryParts = [
+      payload.supplementary_content,
+      draftPayload.supplementary_content as string | undefined,
+      inputExtra,
+    ].filter(Boolean)
     await _confirmWorkflow(payload.messageId, 'meeting_plan_confirm', () =>
-      confirmMeetingPlan(activeSessionId.value!),
+      confirmMeetingPlan(activeSessionId.value!, {
+        supplementary_content: supplementaryParts.length
+          ? supplementaryParts.join('，')
+          : undefined,
+        subject: payload.subject ?? (draftPayload.subject as string | undefined),
+        room: payload.room ?? (draftPayload.room as string | null | undefined),
+        room_flexible: payload.room_flexible ?? (draftPayload.room_flexible as boolean | undefined),
+        attendees: payload.attendees ?? (draftPayload.attendees as string | undefined),
+        date_hint: payload.date_hint ?? (draftPayload.date_hint as string | undefined),
+        start_hint: payload.start_hint ?? (draftPayload.start_hint as string | undefined),
+        end_hint: payload.end_hint ?? (draftPayload.end_hint as string | undefined),
+      }),
+    )
+  }
+
+  async function confirmLeavePlanAction(payload: {
+    messageId: string
+    reason: string
+    attachment_name?: string
+    leave_type?: string
+    date_start?: string
+    date_end?: string
+    start_period?: string
+    end_period?: string
+  }) {
+    const supplementary = takeSupplementaryInput()
+    const draft = workflowCardDrafts.value[`${payload.messageId}:leave_plan_confirm`]
+    const draftPayload = draft?.payload ?? {}
+    await _confirmWorkflow(payload.messageId, 'leave_plan_confirm', () =>
+      confirmLeavePlan(activeSessionId.value!, {
+        reason: payload.reason || (draftPayload.reason as string) || '',
+        attachment_name: payload.attachment_name ?? (draftPayload.attachment_name as string | undefined),
+        leave_type: payload.leave_type ?? (draftPayload.leave_type as string | undefined),
+        date_start: payload.date_start ?? (draftPayload.date_start as string | undefined),
+        date_end: payload.date_end ?? (draftPayload.date_end as string | undefined),
+        start_period: payload.start_period ?? (draftPayload.start_period as string | undefined),
+        end_period: payload.end_period ?? (draftPayload.end_period as string | undefined),
+        supplementary_content: supplementary || undefined,
+      }),
+    )
+  }
+
+  async function confirmInfoCollectPlanAction(payload: {
+    messageId: string
+    structured: import('@/mocks/settings').MemoryStructured
+  }) {
+    const inputExtra = takeSupplementaryInput()
+    const draft = workflowCardDrafts.value[`${payload.messageId}:info_collect_plan_confirm`]
+    const draftStructured = draft?.payload?.structured as
+      import('@/mocks/settings').MemoryStructured | undefined
+    const structured = draftStructured
+      ? { ...payload.structured, ...draftStructured, related_projects: draftStructured.related_projects?.length
+          ? [...draftStructured.related_projects]
+          : payload.structured.related_projects }
+      : payload.structured
+    await _confirmWorkflow(payload.messageId, 'info_collect_plan_confirm', () =>
+      confirmInfoCollectPlan(activeSessionId.value!, {
+        structured,
+        supplementary_content: inputExtra || undefined,
+      }),
     )
   }
 
@@ -367,6 +532,16 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  async function handleOaTaskUpdate(payload: {
+    sessionId: string
+    taskId: string
+    action: 'submitted' | 'completed'
+  }) {
+    if (activeSessionId.value === payload.sessionId) {
+      await loadMessages(payload.sessionId)
+    }
+  }
+
   return {
     sessions,
     activeSessionId,
@@ -379,6 +554,8 @@ export const useChatStore = defineStore('chat', () => {
     workflowSubmitting,
     activeSession,
     isActiveSessionEnded,
+    activeInputDraft,
+    setWorkflowCardDraft,
     loadSessions,
     reset,
     loadMessages,
@@ -392,6 +569,9 @@ export const useChatStore = defineStore('chat', () => {
     confirmWorkpackagePlan: confirmWorkpackagePlanAction,
     confirmTravelPlan: confirmTravelPlanAction,
     confirmMeetingPlan: confirmMeetingPlanAction,
+    confirmLeavePlan: confirmLeavePlanAction,
+    confirmInfoCollectPlan: confirmInfoCollectPlanAction,
     clearUserMemory,
+    handleOaTaskUpdate,
   }
 })

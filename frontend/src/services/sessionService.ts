@@ -1,4 +1,6 @@
 import type { ApiResponse, Message, PaginatedData, Session } from '@/types'
+import type { WorkflowCardDraft } from '@/utils/workflowCardDraft'
+import { buildCardDraftQueryParam } from '@/utils/workflowCardDraft'
 import {
   mockCreateSession,
   mockDeleteSession,
@@ -119,6 +121,7 @@ export async function sendMessageStream(
   sessionId: string,
   content: string,
   handlers: StreamMessageHandlers,
+  options?: { cardDraft?: WorkflowCardDraft | null },
 ): Promise<void> {
   if (isMockMode('sessions')) {
     const result = mockSendMessage(sessionId, content)
@@ -143,7 +146,12 @@ export async function sendMessageStream(
 
   const token = localStorage.getItem('token')
   const base = import.meta.env.VITE_API_BASE_URL || '/api'
-  const url = `${base}/sessions/${encodeURIComponent(sessionId)}/stream?content=${encodeURIComponent(content)}`
+  const cardDraftParam = buildCardDraftQueryParam(options?.cardDraft ?? null)
+  const query = new URLSearchParams({ content })
+  if (cardDraftParam) {
+    query.set('card_draft', cardDraftParam)
+  }
+  const url = `${base}/sessions/${encodeURIComponent(sessionId)}/stream?${query.toString()}`
   const res = await fetch(url, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   })
@@ -219,7 +227,12 @@ export async function confirmRoomSelection(
 
 export async function confirmWorkpackagePlan(
   sessionId: string,
-  payload?: { project?: string },
+  payload?: {
+    project?: string
+    all_days_eight_hours?: boolean
+    hours_per_day?: number
+    supplementary_content?: string
+  },
 ): Promise<
   ApiResponse<{
     user_message: Message
@@ -229,7 +242,13 @@ export async function confirmWorkpackagePlan(
 > {
   const { data } = await api.post(
     `/sessions/${encodeURIComponent(sessionId)}/workpackage-plan-confirm`,
-    { confirmed: true, project: payload?.project ?? null },
+    {
+      confirmed: true,
+      project: payload?.project ?? null,
+      all_days_eight_hours: payload?.all_days_eight_hours ?? null,
+      hours_per_day: payload?.hours_per_day ?? null,
+      supplementary_content: payload?.supplementary_content ?? null,
+    },
   )
   return data
 }
@@ -253,6 +272,7 @@ export async function confirmWorkpackageFill(
 
 export async function confirmTravelPlan(
   sessionId: string,
+  payload?: { supplementary_content?: string },
 ): Promise<
   ApiResponse<{
     user_message: Message
@@ -262,12 +282,23 @@ export async function confirmTravelPlan(
 > {
   const { data } = await api.post(`/sessions/${encodeURIComponent(sessionId)}/travel-plan-confirm`, {
     confirmed: true,
+    supplementary_content: payload?.supplementary_content ?? null,
   })
   return data
 }
 
 export async function confirmMeetingPlan(
   sessionId: string,
+  payload?: {
+    supplementary_content?: string
+    subject?: string
+    room?: string | null
+    room_flexible?: boolean
+    attendees?: string
+    date_hint?: string
+    start_hint?: string
+    end_hint?: string
+  },
 ): Promise<
   ApiResponse<{
     user_message: Message
@@ -277,7 +308,70 @@ export async function confirmMeetingPlan(
 > {
   const { data } = await api.post(`/sessions/${encodeURIComponent(sessionId)}/meeting-plan-confirm`, {
     confirmed: true,
+    supplementary_content: payload?.supplementary_content ?? null,
+    subject: payload?.subject ?? null,
+    room: payload?.room ?? null,
+    selected_room: payload?.room ?? null,
+    room_flexible: payload?.room_flexible ?? null,
+    attendees: payload?.attendees ?? null,
+    date_hint: payload?.date_hint ?? null,
+    start_hint: payload?.start_hint ?? null,
+    end_hint: payload?.end_hint ?? null,
   })
+  return data
+}
+
+export async function confirmLeavePlan(
+  sessionId: string,
+  payload: {
+    reason: string
+    attachment_name?: string
+    leave_type?: string
+    date_start?: string
+    date_end?: string
+    start_period?: string
+    end_period?: string
+    supplementary_content?: string
+  },
+): Promise<
+  ApiResponse<{
+    user_message: Message
+    assistant_message: Message
+    session_title?: string
+  }>
+> {
+  const { data } = await api.post(`/sessions/${encodeURIComponent(sessionId)}/leave-plan-confirm`, {
+    confirmed: true,
+    reason: payload.reason,
+    attachment_name: payload.attachment_name ?? null,
+    leave_type: payload.leave_type ?? null,
+    date_start: payload.date_start ?? null,
+    date_end: payload.date_end ?? null,
+    start_period: payload.start_period ?? null,
+    end_period: payload.end_period ?? null,
+    supplementary_content: payload.supplementary_content ?? null,
+  })
+  return data
+}
+
+export async function confirmInfoCollectPlan(
+  sessionId: string,
+  payload: { structured: Record<string, unknown>; supplementary_content?: string },
+): Promise<
+  ApiResponse<{
+    user_message: Message
+    assistant_message: Message
+    session_title?: string
+  }>
+> {
+  const { data } = await api.post(
+    `/sessions/${encodeURIComponent(sessionId)}/info-collect-plan-confirm`,
+    {
+      confirmed: true,
+      structured: payload.structured,
+      supplementary_content: payload.supplementary_content ?? null,
+    },
+  )
   return data
 }
 

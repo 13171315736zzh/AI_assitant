@@ -21,23 +21,26 @@ from src.repositories.user import UserRepository
 from src.repositories.user_settings import UserSettingsRepository
 from src.services.admin import SystemConfigService
 
+DEMO_STRUCTURED = {
+    "display_name": "张明",
+    "employee_id": "0176338",
+    "job_role": "产品经理",
+    "department": "神东煤炭集团",
+    "position": "非管理岗",
+    "email": "zhangming@ceic.com",
+    "travel_mode_preference": "高铁",
+    "related_projects": ["神东能源数据治理平台"],
+    "gender": "男",
+    "id_number": "",
+    "base_location": "北京市",
+}
+
 DEMO_MEMORY_ITEMS = [
     {"key": "常用出差目的地", "value": "鄂尔多斯、北京"},
     {"key": "常用联系人", "value": "李经理（工包审批）"},
-    {"key": "默认部门", "value": "神东煤炭集团"},
     {"key": "沟通偏好", "value": "简洁回复，优先表格展示"},
     {"key": "差旅偏好", "value": "优先下午航班，经济舱"},
 ]
-
-DEMO_STRUCTURED = {
-    "employee_id": "0176338",
-    "department": "神东煤炭集团",
-    "position": "员工",
-    "email": "zhangming@ceic.com",
-    "travel_mode_preference": "经济舱",
-    "related_projects": ["神东能源数据治理平台"],
-    "gender": "unknown",
-}
 
 CHANGELOG = [
     ChangelogEntry(
@@ -54,13 +57,17 @@ CHANGELOG = [
 
 def _base_structured(user: User) -> dict:
     return {
-        "employee_id": user.employee_id,
+        "display_name": user.display_name or "",
+        "employee_id": user.employee_id or "",
+        "job_role": "",
         "department": "",
-        "position": "管理员" if user.role == "admin" else "员工",
+        "position": "",
         "email": "",
         "travel_mode_preference": "",
         "related_projects": [],
         "gender": "unknown",
+        "id_number": "",
+        "base_location": "",
     }
 
 
@@ -103,14 +110,42 @@ class SettingsService:
             structured_json=_demo_structured(user),
         )
 
+    async def _normalize_structured_fields(
+        self,
+        structured: dict,
+        *,
+        source_text: str = "",
+    ) -> dict:
+        from src.services.project_mapping import ProjectMappingService
+
+        return await ProjectMappingService(self.settings_repo.db).normalize_memory_structured(
+            structured,
+            source_text=source_text,
+        )
+
     def _to_memory_public(self, record: UserSettingsRecord) -> MemoryPublic:
+        from src.agent.memory_extractor import count_memory_fields, filter_extension_memory_items
+
         structured = MemoryStructured.model_validate(record.structured_json or {})
-        items = [MemoryItem.model_validate(item) for item in record.memory_items_json or []]
+        filtered_items = filter_extension_memory_items(list(record.memory_items_json or []))
+        items = [MemoryItem.model_validate(item) for item in filtered_items]
         return MemoryPublic(
             memory_enabled=record.memory_enabled,
             structured=structured,
             memory_items=items,
+            field_count=count_memory_fields(
+                record.structured_json or {}, filtered_items
+            ),
         )
+
+    async def _persist_filtered_memory_items(self, record: UserSettingsRecord) -> None:
+        from src.agent.memory_extractor import filter_extension_memory_items
+
+        raw_items = list(record.memory_items_json or [])
+        filtered = filter_extension_memory_items(raw_items)
+        if filtered != raw_items:
+            record.memory_items_json = filtered
+            await self.settings_repo.save(record)
 
     async def get_profile(self, user_id: int) -> ProfilePublic:
         user = await self._get_user(user_id)
@@ -148,15 +183,25 @@ class SettingsService:
     async def get_memory(self, user_id: int) -> MemoryPublic:
         user = await self._get_user(user_id)
         record = await self._get_or_create_settings(user)
-        return self._to_memory_public(record)
+        await self._persist_filtered_memory_items(record)
+        public = self._to_memory_public(record)
+        normalized = await self._normalize_structured_fields(public.structured.model_dump())
+        public.structured = MemoryStructured.model_validate(normalized)
+        return public
 
     async def update_memory(self, user_id: int, body: MemoryUpdateRequest) -> MemoryPublic:
         user = await self._get_user(user_id)
         record = await self._get_or_create_settings(user)
         if body.memory_enabled is not None:
             record.memory_enabled = body.memory_enabled
+        if body.structured is not None:
+            normalized = await self._normalize_structured_fields(body.structured.model_dump())
+            record.structured_json = MemoryStructured.model_validate(normalized).model_dump()
         if body.memory_items is not None:
-            record.memory_items_json = [item.model_dump() for item in body.memory_items]
+            from src.agent.memory_extractor import filter_extension_memory_items
+
+            payload = [item.model_dump() for item in body.memory_items]
+            record.memory_items_json = filter_extension_memory_items(payload)
         await self.settings_repo.save(record)
         return self._to_memory_public(record)
 
@@ -180,38 +225,78 @@ class SettingsService:
             memory_enabled=record.memory_enabled,
         )
 
-    async def try_extract_position_from_message(
+    async def try_extract_memory_from_message(
         self,
         user_id: int,
         user_content: str,
         assistant_context: str | None = None,
     ) -> bool:
+        from src.agent.memory_extractor import (
+            extract_memory_item_updates,
+            extract_structured_updates,
+            merge_memory_items,
+            merge_structured,
+            sanitize_structured_seed,
+        )
         from src.agent.user_memory import extract_position, is_position_confirmed
 
         user = await self._get_user(user_id)
         record = await self._get_or_create_settings(user)
         if not record.memory_enabled:
             return False
-        structured = dict(record.structured_json or _base_structured(user))
-        if is_position_confirmed(structured.get("position")):
+
+        structured = sanitize_structured_seed(
+            dict(record.structured_json or _base_structured(user))
+        )
+        if not structured.get("display_name"):
+            structured["display_name"] = user.display_name
+        if not structured.get("employee_id"):
+            structured["employee_id"] = user.employee_id
+
+        updates = extract_structured_updates(user_content)
+        if updates.get("position") or not is_position_confirmed(structured.get("position")):
+            if "position" not in updates:
+                position = extract_position(user_content, assistant_context)
+                if position:
+                    updates["position"] = position
+
+        item_updates = extract_memory_item_updates(user_content)
+        if not updates and not item_updates:
             return False
-        position = extract_position(user_content, assistant_context)
-        if not position:
-            return False
-        structured["position"] = position
-        record.structured_json = structured
-        items = [dict(item) for item in record.memory_items_json or []]
-        updated = False
-        for item in items:
-            if item.get("key") == "职位":
-                item["value"] = position
-                updated = True
-                break
-        if not updated:
-            items.append({"key": "职位", "value": position})
-        record.memory_items_json = items
+
+        merged_structured = merge_structured(structured, updates)
+        merged_structured = await self._normalize_structured_fields(
+            merged_structured,
+            source_text=user_content,
+        )
+        merged_items = merge_memory_items(
+            list(record.memory_items_json or []), item_updates
+        )
+
+        record.structured_json = merged_structured
+        record.memory_items_json = merged_items
         await self.settings_repo.save(record)
         return True
+
+    async def try_extract_position_from_message(
+        self,
+        user_id: int,
+        user_content: str,
+        assistant_context: str | None = None,
+    ) -> bool:
+        return await self.try_extract_memory_from_message(
+            user_id, user_content, assistant_context
+        )
+
+    async def get_user_structured_memory(self, user_id: int) -> dict:
+        user = await self._get_user(user_id)
+        record = await self._get_or_create_settings(user)
+        structured = dict(record.structured_json or _base_structured(user))
+        if not structured.get("display_name"):
+            structured["display_name"] = user.display_name
+        if not structured.get("employee_id"):
+            structured["employee_id"] = user.employee_id
+        return structured
 
     async def get_confirmed_position(self, user_id: int) -> str | None:
         user = await self._get_user(user_id)
@@ -221,6 +306,16 @@ class SettingsService:
         if is_position_confirmed(position):
             return position
         return None
+
+    async def get_travel_staff_level(self, user_id: int) -> str:
+        from src.agent.user_memory import resolve_travel_staff_level
+
+        structured = await self.get_user_structured_memory(user_id)
+        position = await self.get_confirmed_position(user_id)
+        return resolve_travel_staff_level(
+            memory_structured=structured,
+            override=position,
+        )
 
     async def get_welcome(self) -> WelcomePublic:
         if self.system_config_repo is None:

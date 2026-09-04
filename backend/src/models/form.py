@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 
-FORM_TYPES = frozenset({"email", "meeting", "travel", "workpackage"})
+FORM_TYPES = frozenset({"email", "meeting", "gn_meeting", "travel", "workpackage", "leave", "info_collect"})
 
 
 class FormPublic(BaseModel):

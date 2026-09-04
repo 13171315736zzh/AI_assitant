@@ -7,6 +7,8 @@ import secrets
 from dataclasses import dataclass
 
 from openpyxl import Workbook, load_workbook
+import re
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.project_mapping_models import ProjectMappingRecord
@@ -132,14 +134,31 @@ class ProjectMappingService:
             return None
         records = await self.repo.list_all()
         best: tuple[int, ProjectMappingRecord] | None = None
+
+        def consider(score: int, record: ProjectMappingRecord) -> None:
+            nonlocal best
+            if best is None or score > best[0]:
+                best = (score, record)
+
         for record in records:
             candidates = [record.project_name, *_split_aliases(record.aliases)]
             for name in candidates:
-                if not name or name not in text:
+                if not name:
                     continue
-                score = len(name)
-                if best is None or score > best[0]:
-                    best = (score, record)
+                if name in text:
+                    consider(len(name) + 100, record)
+
+        if best is None:
+            hints = re.findall(r"[\u4e00-\u9fffA-Za-z0-9·]{2,24}", text)
+            for hint in sorted(set(hints), key=len, reverse=True):
+                for record in records:
+                    candidates = [record.project_name, *_split_aliases(record.aliases)]
+                    for name in candidates:
+                        if not name or len(hint) < 2:
+                            continue
+                        if name.startswith(hint) or hint.startswith(name):
+                            consider(len(hint) + (50 if name.startswith(hint) else 10), record)
+
         if best is None:
             return None
         record = best[1]
@@ -155,6 +174,17 @@ class ProjectMappingService:
             policy_city=policy_city,
             full_location=_full_location(city, district, address),
         )
+
+    async def normalize_memory_structured(
+        self,
+        structured: dict,
+        *,
+        source_text: str = "",
+    ) -> dict:
+        from src.agent.memory_normalizer import normalize_structured_fields
+
+        records = await self.repo.list_all()
+        return normalize_structured_fields(structured, records, source_text=source_text)
 
     async def import_excel(
         self, content: bytes, updated_by: str, *, replace: bool = False

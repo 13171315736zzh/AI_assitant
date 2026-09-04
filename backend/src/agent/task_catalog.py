@@ -5,8 +5,11 @@ from __future__ import annotations
 _CATEGORY_LABELS = {
     "travel": "差旅办事",
     "meeting": "会议预约",
+    "gn_meeting": "国能会议",
     "workpackage": "工时填报",
+    "leave": "请假申请",
     "email": "邮件撰写",
+    "info_collect": "信息收集",
     "other": "综合办事",
 }
 
@@ -16,15 +19,24 @@ _TOOL_TAGS: dict[str, str] = {
     "hotel_book": "酒店预订",
     "email_notify": "邮件通知",
     "meeting_book": "会议预约",
+    "gn_meeting_book": "国能会议",
     "room_book": "会议室",
     "workpackage_fill": "工时填报",
+    "leave_apply": "请假申请",
+    "info_collect_publish": "信息收集",
 }
 
 
 def infer_category(steps: list[dict]) -> str:
     tools = {s.get("tool") for s in steps if s.get("tool")}
+    if "info_collect_publish" in tools:
+        return "info_collect"
+    if "leave_apply" in tools:
+        return "leave"
     if "workpackage_fill" in tools:
         return "workpackage"
+    if "gn_meeting_book" in tools:
+        return "gn_meeting"
     if "meeting_book" in tools or "room_book" in tools:
         return "meeting"
     if "travel_apply" in tools or "flight_book" in tools or "hotel_book" in tools:

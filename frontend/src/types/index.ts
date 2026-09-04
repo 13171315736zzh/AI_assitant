@@ -109,7 +109,11 @@ export interface RoomSelectionMeta {
   subject: string
   requested_room: string
   time_label: string
+  start_time?: string
+  end_time?: string
   conflict_reason: string | null
+  equipment_pref?: string | null
+  browse_mode?: boolean
   options: RoomOption[]
 }
 
@@ -142,6 +146,8 @@ export interface WorkpackageConfirmMeta {
   hours_per_day: number
   conflicts: TimesheetConflict[]
   entries: TimesheetEntry[]
+  skipped_days?: Array<{ day_date: string; day_label?: string; reason: string }>
+  total_hours?: number
 }
 
 export interface PlanConfirmItem {
@@ -150,21 +156,111 @@ export interface PlanConfirmItem {
 }
 
 export interface WorkpackagePlanConfirmMeta {
-  status: 'pending' | 'confirmed'
+  status: 'pending' | 'confirmed' | 'superseded'
   title: string
   items: PlanConfirmItem[]
   project_options?: string[]
   selected_project?: string | null
   date_start?: string | null
   date_end?: string | null
+  fill_dates?: Array<{
+    day_date: string
+    day_label?: string
+    period?: string
+    person_days?: number
+    hours?: number
+  }>
   hours_per_day?: number
+  hours_confirmed?: boolean
+  all_days_eight_hours?: boolean | null
+  hours_question?: string
+  hour_presets?: Array<{ label: string; value: number }>
   requires_project?: boolean
 }
 
-export interface PlanConfirmMeta {
-  status: 'pending' | 'confirmed'
+export interface LeavePlanConfirmMeta {
+  status: 'pending' | 'confirmed' | 'superseded'
   title: string
   items: PlanConfirmItem[]
+  leave_type?: string
+  date_start?: string | null
+  date_end?: string | null
+  start_period?: string
+  end_period?: string
+  reason?: string | null
+  attachment_name?: string | null
+  requires_reason?: boolean
+}
+
+export interface PlanConfirmMeta {
+  status: 'pending' | 'confirmed' | 'superseded'
+  title: string
+  items: PlanConfirmItem[]
+  confirm_label?: string
+}
+
+export interface MeetingTimeOption {
+  label: string
+  date_hint: string
+  start_hint: string
+  end_hint: string
+  selected?: boolean
+}
+
+export interface MeetingRoomOption {
+  room: string
+  label: string
+  floor: string
+  capacity: number
+  equipment: string
+}
+
+export interface MeetingPlanConfirmMeta extends PlanConfirmMeta {
+  plan_mode?: 'gn_only' | 'room_only' | 'combined'
+  needs_gn_meeting?: boolean
+  needs_room_booking?: boolean
+  time_options?: MeetingTimeOption[]
+  time_hint?: string
+  room_options?: MeetingRoomOption[]
+  selected_room?: string | null
+  room_flexible?: boolean
+  subject?: string
+  attendees?: string
+  room_hint?: string
+  attendees_hint?: string
+}
+
+export interface GnMeetingResultMeta {
+  meeting_no: string
+  meeting_link: string
+  meeting_password: string
+  subject?: string
+}
+
+export interface RoomBookingResultMeta {
+  room_name: string
+  subject: string
+  start_time: string
+  end_time: string
+  time_label: string
+  attendees: string
+}
+
+export interface RelatedTaskMeta {
+  task_id: string
+  task_title: string
+  progress: string
+  progress_percent: number
+  steps_desc: string
+  meeting_kind?: 'gn' | 'room'
+}
+
+export interface InfoCollectPlanConfirmMeta {
+  status: 'pending' | 'confirmed' | 'superseded'
+  title: string
+  items: PlanConfirmItem[]
+  structured?: Record<string, unknown>
+  field_errors?: Record<string, string>
 }
 
 export interface TaskStep {
@@ -189,7 +285,7 @@ export interface Task {
   created_at: string
 }
 
-export type TaskCategory = 'travel' | 'meeting' | 'workpackage' | 'email' | 'other'
+export type TaskCategory = 'travel' | 'meeting' | 'gn_meeting' | 'workpackage' | 'leave' | 'email' | 'info_collect' | 'other'
 export type TaskDisplayStatus = 'running' | 'completed' | 'cancelled' | 'failed'
 
 export interface TaskSummary {
@@ -207,4 +303,24 @@ export interface TaskSummary {
   current_step: number
   replan_count: number
   created_at: string
+}
+
+export type WorkflowNodeStatus = 'pending' | 'running' | 'submitted' | 'completed'
+
+export interface WorkflowPlanNode {
+  id: string
+  label: string
+  status: WorkflowNodeStatus
+  task_id?: string | null
+}
+
+export interface WorkflowPlan {
+  nodes: WorkflowPlanNode[]
+  active_node_id: string | null
+}
+
+export interface WorkflowNextNode {
+  node_id: string | null
+  label: string | null
+  missing_slots: string[]
 }

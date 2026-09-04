@@ -14,6 +14,7 @@ from src.integrations.llm_factory import (
     detect_message_type,
     history_from_records,
 )
+from src.agent.session_context import SessionContext
 from src.repositories.session import MessageRepository
 
 logger = get_logger()
@@ -63,9 +64,18 @@ class ChatAgentPlugin(BasePlugin):
             logger.error("Session title generation failed", error=str(exc))
         return fallback_session_title(user_messages)
 
-    async def generate_acks(self, user_content: str) -> list[str]:
+    async def generate_acks(self, session_ctx: SessionContext | str) -> list[str]:
+        if isinstance(session_ctx, str):
+            ack_input = session_ctx
+        else:
+            ack_input = session_ctx.merged_text
+            if len(session_ctx.user_texts) > 1:
+                ack_input = (
+                    f"用户在本次会话中先后提到：\n{session_ctx.merged_text}\n\n"
+                    f"最新一句：{session_ctx.latest_user_text}"
+                )
         try:
-            messages = [Message.system(ACK_SYSTEM), Message.user(user_content)]
+            messages = [Message.system(ACK_SYSTEM), Message.user(ack_input)]
             response = await self.provider.chat(
                 messages, max_tokens=160, temperature=0.3
             )

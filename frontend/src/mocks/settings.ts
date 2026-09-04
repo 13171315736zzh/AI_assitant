@@ -6,19 +6,24 @@ export interface MemoryItem {
 }
 
 export interface MemoryStructured {
+  display_name: string
+  gender: string
+  id_number: string
   employee_id: string
-  department: string
+  job_role: string
   position: string
+  base_location: string
+  department: string
   email: string
   travel_mode_preference: string
   related_projects: string[]
-  gender: string
 }
 
 export interface MemorySettings {
   memory_enabled: boolean
   structured: MemoryStructured
   memory_items: MemoryItem[]
+  field_count?: number
 }
 
 export interface ProfileSettings {
@@ -49,18 +54,21 @@ export interface VersionCheckResult {
 const mockMemory: MemorySettings = {
   memory_enabled: true,
   structured: {
+    display_name: '张明',
     employee_id: '0176338',
+    job_role: '产品经理',
     department: '神东煤炭集团',
-    position: '员工',
+    position: '其他人员',
     email: 'zhangming@ceic.com',
-    travel_mode_preference: '经济舱',
+    travel_mode_preference: '高铁',
     related_projects: ['神东能源数据治理平台'],
-    gender: 'unknown',
+    gender: '男',
+    id_number: '',
+    base_location: '北京',
   },
   memory_items: [
     { key: '常用出差目的地', value: '鄂尔多斯、北京' },
     { key: '常用联系人', value: '李经理（工包审批）' },
-    { key: '默认部门', value: '神东煤炭集团' },
     { key: '沟通偏好', value: '简洁回复，优先表格展示' },
     { key: '差旅偏好', value: '优先下午航班，经济舱' },
   ],
@@ -78,10 +86,17 @@ export function mockGetMemory(): MemorySettings {
 
 export function mockUpdateMemory(payload: {
   memory_enabled?: boolean
+  structured?: MemoryStructured
   memory_items?: MemoryItem[]
 }): MemorySettings {
   if (payload.memory_enabled !== undefined) {
     mockMemory.memory_enabled = payload.memory_enabled
+  }
+  if (payload.structured !== undefined) {
+    mockMemory.structured = {
+      ...payload.structured,
+      related_projects: [...payload.structured.related_projects],
+    }
   }
   if (payload.memory_items !== undefined) {
     mockMemory.memory_items = payload.memory_items.map((item) => ({ ...item }))
@@ -92,13 +107,17 @@ export function mockUpdateMemory(payload: {
 export function mockClearMemory(): { cleared: boolean } {
   mockMemory.memory_items = []
   mockMemory.structured = {
+    display_name: '张明',
     employee_id: '0176338',
+    job_role: '',
     department: '',
-    position: '员工',
+    position: '',
     email: '',
     travel_mode_preference: '',
     related_projects: [],
     gender: 'unknown',
+    id_number: '',
+    base_location: '',
   }
   return { cleared: true }
 }

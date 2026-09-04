@@ -8,8 +8,13 @@ from dataclasses import dataclass
 from src.agent.email_etiquette import infer_salutation
 from src.agent.travel_policy_knowledge import accommodation_standard_other, estimate_train_hours
 from src.agent.travel_policy_rules import extract_trip_days, parse_travel_context
+from src.agent.session_context import is_plan_revision_text, merge_user_texts
+from src.agent.user_memory import resolve_travel_staff_level
 
-_TRAVEL_INTENT = re.compile(r"出差|差旅|订票|机票|酒店|行程")
+_TRAVEL_INTENT = re.compile(
+    r"出差|差旅|订票|机票|酒店|行程|办公地点|驻场|"
+    r"住[两二三四\d]+天|到达.*(?:办公|现场)"
+)
 _EMAIL_INTENT = re.compile(r"邮件|发信|通知|告知")
 _BOOK_TRANSPORT = re.compile(r"订票|机票|火车|高铁|车票|航班")
 _BOOK_HOTEL = re.compile(r"酒店|住宿|订房")
@@ -48,22 +53,69 @@ def is_travel_workflow_intent(text: str) -> bool:
     return bool(_TRAVEL_INTENT.search(text))
 
 
-def _merge_user_text(messages) -> str:
-    parts: list[str] = []
-    for record in messages:
-        if record.role == "user" and record.content.strip():
-            parts.append(record.content.strip())
-    return "\n".join(parts)
+def is_travel_workflow_intent_with_memory(text: str, structured: dict | None = None) -> bool:
+    if is_travel_workflow_intent(text):
+        return True
+    if structured:
+        from src.agent.user_memory import infer_travel_intent_from_memory
+
+        return bool(infer_travel_intent_from_memory(text, structured).get("needs_travel"))
+    return False
 
 
-def build_travel_plan(messages, staff_level: str | None = None) -> TravelPlan:
-    combined = _merge_user_text(messages)
+def apply_memory_travel_hints(
+    plan: TravelPlan, structured: dict | None, text: str
+) -> TravelPlan:
+    if structured:
+        from src.agent.user_memory import infer_travel_intent_from_memory
+
+        pref = (structured.get("travel_mode_preference") or "").strip()
+        if pref == "飞机" and not plan.transport_pref:
+            plan.transport_pref = "经济舱"
+            plan.needs_transport = True
+        elif pref == "高铁" and not plan.transport_pref:
+            plan.transport_pref = "高铁"
+            plan.needs_transport = True
+        elif pref == "自驾" and not plan.transport_pref:
+            plan.transport_pref = "自驾"
+
+        inferred = infer_travel_intent_from_memory(text, structured)
+        if inferred.get("needs_travel"):
+            if inferred.get("destination") and not plan.destination:
+                plan.destination = str(inferred["destination"])
+            if inferred.get("origin") and not plan.origin:
+                plan.origin = str(inferred["origin"])
+            plan.needs_transport = True
+            if inferred.get("needs_booking"):
+                plan.needs_transport = True
+            if not plan.trip_days:
+                plan.trip_days = 1
+    return plan
+
+
+def build_travel_plan(
+    messages,
+    staff_level: str | None = None,
+    *,
+    memory_structured: dict | None = None,
+) -> TravelPlan:
+    combined = merge_user_texts(
+        [
+            record.content.strip()
+            for record in messages
+            if getattr(record, "role", None) == "user" and record.content.strip()
+        ]
+    )
     ctx = parse_travel_context(combined)
     plan = TravelPlan(raw_goal=combined[:200])
     plan.origin = ctx.origin
     plan.destination = ctx.destination
     plan.trip_days = ctx.trip_days or extract_trip_days(combined)
-    plan.staff_level = ctx.staff_level or staff_level
+    plan.staff_level = resolve_travel_staff_level(
+        memory_structured=memory_structured,
+        override=staff_level,
+        from_message=ctx.staff_level,
+    )
     plan.needs_email = bool(_EMAIL_INTENT.search(combined))
     plan.needs_transport = bool(_BOOK_TRANSPORT.search(combined)) or "出差" in combined
     plan.needs_hotel = bool(_BOOK_HOTEL.search(combined))
@@ -134,6 +186,7 @@ def build_travel_plan(messages, staff_level: str | None = None) -> TravelPlan:
             plan.transport_pref = m.group(0)
 
     _finalize_travel_needs(plan, combined)
+    _apply_policy_defaults_from_staff_level(plan)
 
     if (
         not plan.trip_days
@@ -146,11 +199,32 @@ def build_travel_plan(messages, staff_level: str | None = None) -> TravelPlan:
 
 
 _NO_HOTEL = re.compile(r"不住宿|不住酒店|无需酒店|不需要酒店|不用订房")
-_MULTI_DAY_HOTEL = re.compile(r"(\d+)\s*天")
+
+
+def _apply_policy_defaults_from_staff_level(plan: TravelPlan) -> None:
+    """按差旅人员类别套用住宿限额与交通舱位默认值。"""
+    level = plan.staff_level or "其他人员"
+    plan.staff_level = level
+    if plan.destination and not plan.hotel_max_price:
+        limit, _ = accommodation_standard_other(plan.destination)
+        plan.hotel_max_price = limit
+    if not plan.transport_pref:
+        if level == "主要负责人":
+            plan.transport_pref = "公务舱"
+        elif level == "其他负责人":
+            plan.transport_pref = "经济舱"
+        else:
+            plan.transport_pref = "经济舱"
 
 
 def _finalize_travel_needs(plan: TravelPlan, combined: str) -> None:
     """补全交通/住宿意图：多日出差默认需要酒店。"""
+    if re.search(
+        r"办公地点|驻场|(?:到达|抵达|赶到).*(?:办公|现场|神东|鄂尔多斯|雁宝|燕宝)",
+        combined,
+    ):
+        plan.needs_transport = True
+
     if "出差" in combined or plan.needs_transport or plan.needs_hotel:
         plan.needs_transport = True
 
@@ -164,9 +238,8 @@ def _finalize_travel_needs(plan: TravelPlan, combined: str) -> None:
 
     days = plan.trip_days
     if days is None:
-        m = _MULTI_DAY_HOTEL.search(combined)
-        if m:
-            days = int(m.group(1))
+        days = extract_trip_days(combined)
+        if days:
             plan.trip_days = days
 
     if days is not None and days >= 2:
@@ -255,9 +328,29 @@ def travel_plan_confirm_items(plan: TravelPlan) -> list[dict[str, str]]:
     return items
 
 
-def build_travel_plan_confirm_content(plan: TravelPlan) -> str:
+def is_travel_plan_update(text: str) -> bool:
+    """待确认出差单存在时，识别用户的补充/修正说明。"""
+    if is_plan_revision_text(text):
+        return True
+    if _TRAVEL_INTENT.search(text):
+        return True
+    if _EMAIL_INTENT.search(text) or _BOOK_TRANSPORT.search(text) or _BOOK_HOTEL.search(text):
+        return True
+    if _PM_PATTERN.search(text):
+        return True
+    if re.search(r"明天|后天|周[一二三四五六日]|项目|经理|目的地|出发|返回|天数|天", text):
+        return True
+    return False
+
+
+def build_travel_plan_confirm_content(plan: TravelPlan, *, updated: bool = False) -> str:
+    intro = (
+        "已根据您补充的信息更新出差安排，请核对："
+        if updated
+        else "信息已收集完毕，请核对以下出差安排："
+    )
     lines = [
-        "信息已收集完毕，请核对以下出差安排：",
+        intro,
         "",
     ]
     for item in travel_plan_confirm_items(plan):
@@ -332,14 +425,17 @@ def build_execution_summary(
     origin = plan.origin or "北京"
     days = plan.trip_days or 3
     limit, label = accommodation_standard_other(dest)
+    staff = plan.staff_level or "其他人员"
     hours = estimate_train_hours(origin, dest)
     transport_line = f"{origin}→{dest}"
-    if hours and hours >= 6:
+    if hours and hours >= 6 and staff == "其他人员":
         transport_line += f"，铁路约 {hours:g} 小时，可按细则乘坐火车软席"
     elif plan.transport_pref:
         transport_line += f"，交通方式：{plan.transport_pref}"
-    else:
+    elif staff == "其他人员":
         transport_line += "，交通：高铁/飞机（经济舱/二等座）"
+    else:
+        transport_line += f"，交通：按{staff}标准预订"
 
     lines = [
         f"信息已齐全，已为您启动「{dest}出差」办理流程，当前进展如下：",
@@ -347,7 +443,7 @@ def build_execution_summary(
         "一、行程概要",
         f"- 出发地：{origin}；目的地：{dest}；出差约 {days} 天",
         f"- {transport_line}",
-        f"- 住宿参考：{label} 其他人员标准 {limit} 元/人·天",
+        f"- 住宿参考：{label} {staff}标准 {limit} 元/人·天",
         "",
     ]
 

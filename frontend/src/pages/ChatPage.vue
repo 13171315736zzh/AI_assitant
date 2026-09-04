@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/useAuthStore'
 import { useChatStore } from '@/stores/useChatStore'
@@ -12,7 +12,10 @@ import TaskDetailPanel from '@/components/chat/TaskDetailPanel.vue'
 import DocumentPreviewModal from '@/components/chat/DocumentPreviewModal.vue'
 import BusinessFormPanel from '@/components/chat/BusinessFormPanel.vue'
 import ConfirmDialog from '@/components/chat/ConfirmDialog.vue'
+import WorkflowPlanRail from '@/components/chat/WorkflowPlanRail.vue'
+import { useOaTaskSync } from '@/composables/useOaTaskSync'
 import type { MessageSource, Session } from '@/types'
+import { extractWorkflowPlan, workflowPlanVisible } from '@/utils/workflowPlan'
 
 const chat = useChatStore()
 const auth = useAuthStore()
@@ -24,6 +27,38 @@ const activeFormId = ref<string | null>(null)
 const previewSource = ref<MessageSource | null>(null)
 const deleteTarget = ref<Session | null>(null)
 const deleting = ref(false)
+const workflowRailExpanded = ref(false)
+const userCollapsedRail = ref(false)
+
+const workflowPlan = computed(() => extractWorkflowPlan(chat.messages))
+const showWorkflowRail = computed(() => workflowPlanVisible(workflowPlan.value))
+
+watch(
+  () => chat.activeSessionId,
+  () => {
+    workflowRailExpanded.value = false
+    userCollapsedRail.value = false
+  },
+)
+
+watch(
+  workflowPlan,
+  (plan) => {
+    if (!workflowPlanVisible(plan)) {
+      workflowRailExpanded.value = false
+      return
+    }
+    if (!userCollapsedRail.value) {
+      workflowRailExpanded.value = true
+    }
+  },
+  { deep: true },
+)
+
+function toggleWorkflowRail() {
+  workflowRailExpanded.value = !workflowRailExpanded.value
+  userCollapsedRail.value = !workflowRailExpanded.value
+}
 
 onMounted(async () => {
   await chat.loadSessions()
@@ -36,6 +71,10 @@ onMounted(async () => {
     }
     router.replace({ name: 'chat' })
   }
+})
+
+useOaTaskSync((payload) => {
+  void chat.handleOaTaskUpdate(payload)
 })
 
 watch(
@@ -55,12 +94,6 @@ async function handleEndSession() {
   }
   if (confirm('确认结束当前会话？结束后将无法继续发送消息。')) {
     await chat.endCurrentSession()
-  }
-}
-
-async function handleClearMemory() {
-  if (confirm('确认清除所有长期记忆？此操作不可撤销。')) {
-    await chat.clearUserMemory()
   }
 }
 
@@ -121,9 +154,14 @@ function openSource(source: MessageSource) {
     />
 
     <section class="main">
-      <ChatTopbar
-        @ticket="showTicket = true"
-        @clear-memory="handleClearMemory"
+      <ChatTopbar @ticket="showTicket = true" />
+
+      <WorkflowPlanRail
+        v-if="showWorkflowRail && workflowPlan"
+        :plan="workflowPlan"
+        :expanded="workflowRailExpanded"
+        @toggle="toggleWorkflowRail"
+        @open-task="openTask"
       />
 
       <MessageList
@@ -138,10 +176,14 @@ function openSource(source: MessageSource) {
         @confirm-workpackage-plan="chat.confirmWorkpackagePlan"
         @confirm-travel-plan="chat.confirmTravelPlan"
         @confirm-meeting-plan="chat.confirmMeetingPlan"
+        @confirm-leave-plan="chat.confirmLeavePlan"
+        @confirm-info-collect-plan="chat.confirmInfoCollectPlan"
+        @update-card-draft="chat.setWorkflowCardDraft"
         @quick-start="chat.send"
       />
 
       <ChatInput
+        v-model="chat.activeInputDraft"
         :disabled="chat.isActiveSessionEnded"
         :sending="chat.sending"
         @send="chat.send"
@@ -192,6 +234,7 @@ function openSource(source: MessageSource) {
 }
 
 .main {
+  position: relative;
   flex: 1;
   min-width: 0;
   display: flex;
