@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import type { MeetingPlanConfirmMeta, MeetingRoomOption, MeetingTimeOption } from '@/types'
+import type { MeetingPlanConfirmMeta, MeetingRoomOption } from '@/types'
 
 const props = defineProps<{
   confirm: MeetingPlanConfirmMeta
@@ -26,6 +26,12 @@ const attendees = ref(props.confirm.attendees ?? '')
 const selectedRoom = ref<string | null>(props.confirm.selected_room ?? null)
 const roomFlexible = ref(Boolean(props.confirm.room_flexible))
 const customRoom = ref('')
+const meetingDate = ref('')
+const startTime = ref('14:00')
+const endTime = ref('15:00')
+const initialDate = ref('')
+const initialStart = ref('14:00')
+const initialEnd = ref('15:00')
 
 const needsRoomBooking = computed(() => {
   if (props.confirm.plan_mode === 'gn_only') return false
@@ -37,13 +43,57 @@ const needsRoomBooking = computed(() => {
 })
 
 const planMode = computed(() => props.confirm.plan_mode ?? 'room_only')
-const timeOptions = computed(() => props.confirm.time_options ?? [])
 const roomOptions = computed(() => (needsRoomBooking.value ? props.confirm.room_options ?? [] : []))
-
-const defaultOption = computed(
-  () => timeOptions.value.find((item) => item.selected) ?? timeOptions.value[0] ?? null,
+const showGnMeetingForm = computed(
+  () => planMode.value === 'gn_only' || (props.confirm.needs_gn_meeting && !needsRoomBooking.value),
 )
-const selectedTime = ref<MeetingTimeOption | null>(defaultOption.value)
+
+function formatDateIso(date: Date): string {
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, '0')
+  const d = String(date.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
+function dateHintToIso(dateHint: string | undefined): string {
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  if (!dateHint) return formatDateIso(today)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateHint)) return dateHint
+  if (dateHint.includes('后天')) {
+    const d = new Date(today)
+    d.setDate(d.getDate() + 2)
+    return formatDateIso(d)
+  }
+  if (dateHint.includes('明天')) {
+    const d = new Date(today)
+    d.setDate(d.getDate() + 1)
+    return formatDateIso(d)
+  }
+  if (dateHint.includes('今天') || dateHint.includes('今日') || dateHint.includes('今晚')) {
+    return formatDateIso(today)
+  }
+  return formatDateIso(today)
+}
+
+function normalizeTime(value: string | undefined, fallback: string): string {
+  const raw = (value || fallback).trim()
+  const match = raw.match(/^(\d{1,2}):(\d{2})/)
+  if (!match) return fallback
+  return `${match[1].padStart(2, '0')}:${match[2]}`
+}
+
+function syncTimeFieldsFromConfirm(value: MeetingPlanConfirmMeta) {
+  const date = dateHintToIso(value.date_hint)
+  const start = normalizeTime(value.start_hint, '14:00')
+  const end = normalizeTime(value.end_hint, normalizeTime(value.start_hint, '14:00'))
+  meetingDate.value = date
+  startTime.value = start
+  endTime.value = end
+  initialDate.value = date
+  initialStart.value = start
+  initialEnd.value = end
+}
 
 watch(
   () => props.confirm,
@@ -51,9 +101,7 @@ watch(
     subject.value = value.subject ?? '工作会议'
     attendees.value = value.attendees ?? ''
     roomFlexible.value = Boolean(value.room_flexible)
-    selectedTime.value = value.time_options?.find((item) => item.selected)
-      ?? value.time_options?.[0]
-      ?? null
+    syncTimeFieldsFromConfirm(value)
 
     const room = value.selected_room ?? null
     const inOptions = value.room_options?.some((item) => item.room === room)
@@ -68,7 +116,7 @@ watch(
       customRoom.value = ''
     }
   },
-  { deep: true },
+  { deep: true, immediate: true },
 )
 
 const isPending = computed(() => props.confirm.status === 'pending')
@@ -88,26 +136,16 @@ const confirmLabel = computed(() => {
   return '确认开始办理'
 })
 
-function buildTimePhrase(option: MeetingTimeOption): string | undefined {
-  const hour = Number.parseInt(option.start_hint.split(':')[0] ?? '14', 10)
-  const dateHint = option.date_hint || '今天'
-  if (dateHint === '今天' && hour >= 18) return `今晚${hour}点`
-  if (dateHint === '今天') {
-    const period = hour < 12 ? '上午' : '下午'
-    return `今天${period}${hour}点`
-  }
-  if (dateHint === '明天') {
-    const period = hour < 12 ? '上午' : '下午'
-    return `明天${period}${hour}点`
-  }
-  return `${dateHint}${hour}点`
+function buildTimePhrase(): string | undefined {
+  if (!meetingDate.value || !startTime.value) return undefined
+  return `会议时间改为 ${meetingDate.value} ${startTime.value}-${endTime.value || startTime.value}`
 }
 
 function buildDraftPayload() {
-  const timeChanged = selectedTime.value
-    && defaultOption.value
-    && selectedTime.value.start_hint !== defaultOption.value.start_hint
   const room = effectiveRoom.value
+  const timeChanged = meetingDate.value !== initialDate.value
+    || startTime.value !== initialStart.value
+    || endTime.value !== initialEnd.value
 
   return {
     subject: subject.value.trim(),
@@ -115,12 +153,10 @@ function buildDraftPayload() {
     selected_room: room,
     room_flexible: roomFlexible.value,
     attendees: attendees.value.trim(),
-    date_hint: selectedTime.value?.date_hint,
-    start_hint: selectedTime.value?.start_hint,
-    end_hint: selectedTime.value?.end_hint,
-    supplementary_content: timeChanged && selectedTime.value
-      ? buildTimePhrase(selectedTime.value)
-      : undefined,
+    date_hint: meetingDate.value,
+    start_hint: startTime.value,
+    end_hint: endTime.value,
+    supplementary_content: timeChanged ? buildTimePhrase() : undefined,
   }
 }
 
@@ -129,15 +165,11 @@ function syncDraft() {
   emit('update-draft', buildDraftPayload())
 }
 
-watch([subject, attendees, selectedRoom, roomFlexible, customRoom, selectedTime], syncDraft, {
-  deep: true,
-  immediate: true,
-})
-
-function selectTime(option: MeetingTimeOption) {
-  if (!isPending.value) return
-  selectedTime.value = option
-}
+watch(
+  [subject, attendees, selectedRoom, roomFlexible, customRoom, meetingDate, startTime, endTime],
+  syncDraft,
+  { deep: true, immediate: true },
+)
 
 function selectRoom(option: MeetingRoomOption) {
   if (!isPending.value) return
@@ -171,13 +203,13 @@ function handleConfirm() {
 
     <div v-if="isPending" class="fields">
       <div class="field-row">
-        <span class="field-key">会议主题</span>
+        <span class="field-key">会议名称</span>
         <div class="field-col">
           <input
             v-model="subject"
             type="text"
             class="field-input"
-            placeholder="填写会议主题"
+            placeholder="填写会议名称或主题"
             :disabled="submitting"
           />
         </div>
@@ -186,29 +218,39 @@ function handleConfirm() {
       <div class="field-row">
         <span class="field-key">会议时间</span>
         <div class="field-col">
-          <p v-if="timeOptions.length" class="field-hint">
-            {{ confirm.time_hint ?? '点选确认时段' }}
-          </p>
-          <div v-if="timeOptions.length" class="chip-list">
-            <button
-              v-for="option in timeOptions"
-              :key="option.label"
-              type="button"
-              class="chip"
-              :class="{ selected: selectedTime?.start_hint === option.start_hint }"
-              :disabled="submitting"
-              @click="selectTime(option)"
-            >
-              {{ option.label }}
-            </button>
+          <div class="time-inputs">
+            <label class="time-field">
+              <span class="time-label">日期</span>
+              <input
+                v-model="meetingDate"
+                type="date"
+                class="field-input"
+                :disabled="submitting"
+              />
+            </label>
+            <label class="time-field">
+              <span class="time-label">开始</span>
+              <input
+                v-model="startTime"
+                type="time"
+                class="field-input"
+                :disabled="submitting"
+              />
+            </label>
+            <label class="time-field">
+              <span class="time-label">结束</span>
+              <input
+                v-model="endTime"
+                type="time"
+                class="field-input"
+                :disabled="submitting"
+              />
+            </label>
           </div>
-          <span v-else class="editable-display static">
-            {{ confirm.items.find((item) => item.label.includes('时间'))?.value ?? '—' }}
-          </span>
         </div>
       </div>
 
-      <div v-if="needsRoomBooking" class="field-row">
+      <div v-if="needsRoomBooking" class="field-row field-row-top">
         <span class="field-key">会议室</span>
         <div class="field-col">
           <p class="field-hint">{{ confirm.room_hint ?? '点选、灵活选择，或在下方输入会议室名称' }}</p>
@@ -245,22 +287,24 @@ function handleConfirm() {
         </div>
       </div>
 
-      <div v-else-if="planMode === 'gn_only'" class="field-row">
+      <div v-else-if="showGnMeetingForm" class="field-row">
         <span class="field-key">会议形式</span>
         <div class="field-col">
-          <span class="editable-display static">国能会议（线上/视频）</span>
+          <span class="chip chip-fixed selected">国能会议</span>
         </div>
       </div>
 
-      <div class="field-row">
+      <div class="field-row field-row-top">
         <span class="field-key">参会人员</span>
         <div class="field-col">
-          <p class="field-hint">{{ confirm.attendees_hint ?? '填写参会人员' }}</p>
-          <input
+          <p class="field-hint">
+            {{ confirm.attendees_hint ?? '填写参会人姓名、邮箱或国能工号，多人用顿号/逗号分隔' }}
+          </p>
+          <textarea
             v-model="attendees"
-            type="text"
-            class="field-input"
-            placeholder="如：张明、李经理（可留空）"
+            class="attendees-input"
+            rows="2"
+            placeholder="如：张明、zhangming@company.com、0176338"
             :disabled="submitting"
           />
         </div>
@@ -316,8 +360,15 @@ function handleConfirm() {
   gap: 8px;
 }
 
-.field-key {
+.field-row-top {
+  align-items: start;
+}
+
+.field-row-top .field-key {
   padding-top: 8px;
+}
+
+.field-key {
   font-size: 12px;
   color: var(--text-secondary);
 }
@@ -330,6 +381,7 @@ function handleConfirm() {
   margin: 0 0 6px;
   font-size: 12px;
   color: var(--text-muted);
+  line-height: 1.5;
 }
 
 .field-input {
@@ -343,21 +395,32 @@ function handleConfirm() {
   font-size: 13px;
 }
 
-.editable-display {
+.attendees-input {
   width: 100%;
-  min-height: 36px;
-  padding: 8px 10px;
-  border: 1px dashed var(--border);
+  min-height: 64px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--text);
   font-size: 13px;
-  text-align: left;
-  cursor: pointer;
+  font-family: inherit;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.editable-display {
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
 }
 
 .editable-display.static {
-  cursor: default;
   border-style: solid;
 }
 
@@ -366,6 +429,24 @@ function handleConfirm() {
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 8px;
+}
+
+.time-inputs {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 1fr;
+  gap: 8px;
+}
+
+.time-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.time-label {
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 .room-input {
@@ -389,26 +470,19 @@ function handleConfirm() {
   font-weight: 500;
 }
 
+.chip-fixed {
+  display: inline-flex;
+  align-items: center;
+  cursor: default;
+  pointer-events: none;
+  user-select: none;
+}
+
 .chip:disabled,
 .field-input:disabled,
-.editable-display:disabled {
+.attendees-input:disabled {
   opacity: 0.55;
   cursor: not-allowed;
-}
-
-.inline-edit {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.mini-btn {
-  height: 36px;
-  padding: 0 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  cursor: pointer;
 }
 
 .info-list {
@@ -465,5 +539,11 @@ function handleConfirm() {
   margin: 0;
   font-size: 12px;
   color: var(--text-muted);
+}
+
+@media (max-width: 520px) {
+  .time-inputs {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

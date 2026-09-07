@@ -45,6 +45,20 @@ const router = createRouter({
       meta: { requiresAuth: true, standalone: true },
     },
     {
+      path: '/oa/transport/:taskId',
+      name: 'oa-transport-book',
+      component: () => import('@/pages/OaBookingPage.vue'),
+      props: { bookingType: 'transport' },
+      meta: { requiresAuth: true, standalone: true },
+    },
+    {
+      path: '/oa/hotel/:taskId',
+      name: 'oa-hotel-book',
+      component: () => import('@/pages/OaBookingPage.vue'),
+      props: { bookingType: 'hotel' },
+      meta: { requiresAuth: true, standalone: true },
+    },
+    {
       path: '/oa/workpackage/:taskId',
       name: 'oa-workpackage-apply',
       component: () => import('@/pages/OaWorkpackageApplyPage.vue'),
@@ -72,6 +86,18 @@ const router = createRouter({
       path: '/oa/room-meeting/:taskId',
       name: 'oa-room-meeting-apply',
       component: () => import('@/pages/OaMeetingApplyPage.vue'),
+      meta: { requiresAuth: true, standalone: true },
+    },
+    {
+      path: '/mail/compose/:taskId',
+      name: 'mail-compose',
+      component: () => import('@/pages/MailComposePage.vue'),
+      meta: { requiresAuth: true, standalone: true },
+    },
+    {
+      path: '/mail/sent/:messageId',
+      name: 'mail-sent',
+      component: () => import('@/pages/MailSentPage.vue'),
       meta: { requiresAuth: true, standalone: true },
     },
     {

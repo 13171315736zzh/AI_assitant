@@ -51,6 +51,9 @@ export function taskFieldValue(value: unknown): string {
   if (value === null || value === undefined) return '—'
   if (typeof value === 'object') {
     const obj = value as Record<string, unknown>
+    if ('train_no' in obj) {
+      return `${obj.train_no} ${obj.departure_time ?? ''} → ${obj.arrival_time ?? ''}`.trim()
+    }
     if ('flight_no' in obj) {
       return `${obj.flight_no} ${obj.departure_time ?? ''} → ${obj.arrival_time ?? ''}`.trim()
     }

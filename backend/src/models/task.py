@@ -34,6 +34,12 @@ class TaskStepUpdateRequest(BaseModel):
     params: dict = Field(default_factory=dict)
 
 
+class EmailSentRequest(BaseModel):
+    recipient: str | None = None
+    subject: str | None = None
+    message_id: str | None = None
+
+
 class TaskStatusPublic(BaseModel):
     id: str
     status: str

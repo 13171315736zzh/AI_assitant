@@ -227,18 +227,48 @@ class WorkpackageWorkflowService:
         has_pending_plan_flag = has_pending_plan(pending_plan)
         card_payload = _workpackage_card_payload(card_draft)
 
+        from src.agent.workflow_plan import (
+            activated_plan_node,
+            get_workflow_plan_from_session,
+            is_parallel_workflow_plan,
+            should_service_handle_activation,
+        )
+
+        wf_plan = await get_workflow_plan_from_session(self.message_repo, session_id)
+        parallel_plan = is_parallel_workflow_plan(wf_plan)
+        activated_workpackage = activated_plan_node(user_content, wf_plan) == "workpackage"
+        if parallel_plan and not should_service_handle_activation(
+            "workpackage", user_content, wf_plan
+        ):
+            return None
+
         if not is_workpackage_workflow_intent(ctx.combined_text):
             if not (
-                has_pending_plan_flag
-                and (is_workpackage_plan_update(user_content) or card_payload)
+                activated_workpackage
+                or (
+                    has_pending_plan_flag
+                    and (is_workpackage_plan_update(user_content) or card_payload)
+                )
             ):
                 return None
 
         plan = await self._build_plan(ctx.user_messages, user_id)
         _apply_workpackage_card(plan, card_payload)
         if plan.fill_days is None and not has_resolved_period(plan):
+            if activated_workpackage:
+                return (
+                    "请说明要填报的项目与周期，例如「帮我在神东项目填本周5天工时」。",
+                    "text",
+                    None,
+                )
             return None
         if not has_resolved_period(plan) and not plan.project and not plan.project_options:
+            if activated_workpackage:
+                return (
+                    "请说明要填报的项目，例如「帮我在神东项目填本周5天工时」。",
+                    "text",
+                    None,
+                )
             return None
 
         if can_auto_submit(plan):

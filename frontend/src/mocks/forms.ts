@@ -80,6 +80,27 @@ export const formFieldLabels: Record<string, Record<string, string>> = {
     deadline: '截止时间',
     description: '说明',
   },
+  transport_book: {
+    passenger_name: '乘客姓名',
+    id_number: '身份证号',
+    phone: '联系方式',
+    departure_date: '出发日期',
+    departure_time: '出发时间',
+    flight_no: '航班号',
+    origin: '出发地',
+    destination: '目的地',
+    amount: '金额',
+  },
+  hotel_book: {
+    guest_name: '入住人',
+    id_number: '身份证号',
+    phone: '联系方式',
+    check_in: '入住日期',
+    check_out: '离店日期',
+    hotel_name: '酒店名称',
+    room_type: '房型',
+    amount: '单价',
+  },
 }
 
 export function mockGetForm(formId: string): FormData | null {

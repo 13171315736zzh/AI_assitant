@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { Task, TaskStep } from '@/types'
 import { fetchTask, cancelTask, confirmTask } from '@/services/taskService'
 import {
@@ -8,6 +8,8 @@ import {
   taskFieldValue,
 } from '@/utils/taskFieldLabels'
 import { isTravelTask, openOaTravelApply } from '@/utils/oaTravel'
+import { isTransportBookTask, isHotelBookTask, openOaTransportBook, openOaHotelBook } from '@/utils/oaBooking'
+import { isEmailTask } from '@/utils/emailMail'
 import { isWorkpackageTask, openOaWorkpackageApply } from '@/utils/oaWorkpackage'
 import { isLeaveTask, openOaLeaveApply } from '@/utils/oaLeave'
 import { isGnMeetingTask, isRoomBookingTask, openOaGnMeetingApply, openOaRoomMeetingApply } from '@/utils/oaMeeting'
@@ -23,6 +25,37 @@ const emit = defineEmits<{
 const task = ref<Task | null>(null)
 const loading = ref(false)
 const expandedStep = ref<number | null>(null)
+
+const TRAVEL_DETAIL_TOOLS = new Set(['travel_apply', 'user_confirm'])
+const BOOKING_DETAIL_TOOLS = new Set(['flight_book', 'hotel_book', 'user_confirm'])
+const EMAIL_DETAIL_TOOLS = new Set(['email_notify', 'user_confirm'])
+
+const visibleSteps = computed(() => {
+  if (!task.value) return []
+  if (isTransportBookTask(task.value) || isHotelBookTask(task.value)) {
+    return task.value.steps.filter((step) => BOOKING_DETAIL_TOOLS.has(step.tool))
+  }
+  if (isTravelTask(task.value)) {
+    return task.value.steps.filter((step) => TRAVEL_DETAIL_TOOLS.has(step.tool))
+  }
+  if (isEmailTask(task.value)) {
+    return task.value.steps.filter((step) => EMAIL_DETAIL_TOOLS.has(step.tool))
+  }
+  return task.value.steps
+})
+
+const visibleProgress = computed(() => {
+  const steps = visibleSteps.value
+  if (!steps.length) {
+    return { current: 0, total: 0, percent: 0 }
+  }
+  const completed = steps.filter((step) => step.status === 'completed').length
+  return {
+    current: completed,
+    total: steps.length,
+    percent: Math.round((completed / steps.length) * 100),
+  }
+})
 
 async function load() {
   loading.value = true
@@ -63,6 +96,8 @@ async function handleCancel() {
 function oaFormLinkLabel(step: TaskStep): string {
   if (step.tool === 'workpackage_fill') return '查看工时填报单 →'
   if (step.tool === 'travel_apply') return '查看差旅申请单 →'
+  if (step.tool === 'flight_book') return '查看交通预订单 →'
+  if (step.tool === 'hotel_book') return '查看酒店预订单 →'
   if (step.tool === 'leave_apply') return '查看请假申请单 →'
   if (step.tool === 'meeting_book') return '查看会议室预约单 →'
   if (step.tool === 'gn_meeting_book') return '查看国能会议预约单 →'
@@ -79,6 +114,20 @@ async function handleConfirm() {
     const opened = openOaTravelApply(props.taskId)
     if (!opened) {
       alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 差旅申请页。')
+    }
+    return
+  }
+  if (isTransportBookTask(task.value)) {
+    const opened = openOaTransportBook(props.taskId)
+    if (!opened) {
+      alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 交通预订页。')
+    }
+    return
+  }
+  if (isHotelBookTask(task.value)) {
+    const opened = openOaHotelBook(props.taskId)
+    if (!opened) {
+      alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 酒店预订页。')
     }
     return
   }
@@ -132,20 +181,20 @@ function openFormFromStep(step: TaskStep) {
 
         <div class="progress-section">
           <div class="progress-meta">
-            <span>{{ task.current_step }}/{{ task.total_steps }} 步骤已完成</span>
+            <span>{{ visibleProgress.current }}/{{ visibleProgress.total }} 步骤已完成</span>
             <span v-if="task.replan_count > 0" class="replan">重规划 {{ task.replan_count }} 次</span>
           </div>
           <div class="progress-bar">
             <div
               class="progress-fill"
-              :style="{ width: `${(task.current_step / task.total_steps) * 100}%` }"
+              :style="{ width: `${visibleProgress.percent}%` }"
             />
           </div>
         </div>
 
         <div class="timeline">
           <div
-            v-for="step in task.steps"
+            v-for="step in visibleSteps"
             :key="step.step_id"
             class="step-item"
             :class="step.status"

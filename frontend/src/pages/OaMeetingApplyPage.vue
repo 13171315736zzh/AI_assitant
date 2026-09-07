@@ -2,13 +2,17 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/useAuthStore'
-import { approveOaApplication, fetchTask, submitOaApplication } from '@/services/taskService'
+import { approveOaApplication, createGnMeeting, fetchTask, submitOaApplication } from '@/services/taskService'
 import { fetchForm } from '@/services/formService'
 import { formFieldLabels } from '@/mocks/forms'
 import type { Task } from '@/types'
 import {
+  buildOaNotifyPayload,
   buildMeetingApprovalChain,
   detectOaPhase,
+  gnMeetingPrimaryButtonLabel,
+  gnMeetingStatusBadge,
+  isGnMeetingPrimaryButtonDisabled,
   isPrimaryButtonDisabled,
   isPrimaryButtonSubmittedStyle,
   notifyAssistantOaUpdate,
@@ -70,10 +74,27 @@ const approvalChain = computed(() =>
 )
 
 const statusBadge = computed(() => {
+  if (isGnMeeting.value) return gnMeetingStatusBadge(phase.value)
   if (phase.value === 'approved') return { label: '已通过', class: 'approved' }
   if (phase.value === 'submitted') return { label: '审批中', class: 'pending' }
   return { label: '草稿', class: 'draft' }
 })
+
+const primaryLabel = computed(() =>
+  isGnMeeting.value
+    ? gnMeetingPrimaryButtonLabel(phase.value, submitting.value)
+    : primaryButtonLabel(phase.value, submitting.value),
+)
+
+const primaryDisabled = computed(() =>
+  isGnMeeting.value
+    ? isGnMeetingPrimaryButtonDisabled(phase.value, submitting.value)
+    : isPrimaryButtonDisabled(phase.value, submitting.value),
+)
+
+const primarySubmittedStyle = computed(() =>
+  isGnMeeting.value ? phase.value === 'approved' : isPrimaryButtonSubmittedStyle(phase.value),
+)
 
 async function load() {
   loading.value = true
@@ -113,13 +134,26 @@ async function load() {
 }
 
 async function handlePrimaryClick() {
-  if (!task.value || submitting.value || isPrimaryButtonDisabled(phase.value, submitting.value)) {
+  if (!task.value || submitting.value || primaryDisabled.value) {
     return
   }
 
   submitting.value = true
   toastMessage.value = null
   try {
+    if (isGnMeeting.value) {
+      const res = await createGnMeeting(taskId.value)
+      if (res.code !== 200 || !res.data) {
+        error.value = res.message || '创建失败，请重试'
+        return
+      }
+      task.value = res.data.task
+      phase.value = 'approved'
+      toastMessage.value = `国能会议 ${applicationNo.value} 已创建成功，会议信息已同步至智能办公助手。`
+      notifyAssistantOaUpdate(buildOaNotifyPayload(res.data, taskId.value, 'completed'))
+      return
+    }
+
     if (phase.value === 'draft') {
       const res = await submitOaApplication(taskId.value)
       if (res.code !== 200 || !res.data) {
@@ -130,11 +164,7 @@ async function handlePrimaryClick() {
       phase.value = 'submitted'
       const label = isGnMeeting.value ? '国能会议预约' : '会议室预约'
       toastMessage.value = `${label} ${applicationNo.value} 已进入 OA 审批流程（演示）。再次点击灰色按钮可模拟审批通过。`
-      notifyAssistantOaUpdate({
-        sessionId: res.data.session_id,
-        taskId: taskId.value,
-        action: 'submitted',
-      })
+      notifyAssistantOaUpdate(buildOaNotifyPayload(res.data, taskId.value, 'submitted'))
       return
     }
 
@@ -147,11 +177,7 @@ async function handlePrimaryClick() {
       task.value = res.data.task
       phase.value = 'approved'
       toastMessage.value = '审批已全部通过，状态已同步至智能办公助手。'
-      notifyAssistantOaUpdate({
-        sessionId: res.data.session_id,
-        taskId: taskId.value,
-        action: 'completed',
-      })
+      notifyAssistantOaUpdate(buildOaNotifyPayload(res.data, taskId.value, 'completed'))
     }
   } catch {
     error.value = '操作失败，请返回助手重试'
@@ -200,7 +226,10 @@ onMounted(load)
           <span class="sync-icon">↗</span>
           <div>
             <strong>数据已从「智能办公助手」同步</strong>
-            <p>以下内容为助手根据对话自动预填，请在 OA 系统中核对后提交审批。</p>
+            <p v-if="isGnMeeting">
+              以下内容为助手根据对话自动预填，请核对会议主题、时间与参会人员，确认无误后点击「创建」。
+            </p>
+            <p v-else>以下内容为助手根据对话自动预填，请在 OA 系统中核对后提交审批。</p>
           </div>
           <span class="sync-tag">自动同步</span>
         </div>
@@ -254,11 +283,11 @@ onMounted(load)
 
           <div v-if="isGnMeeting" class="section-title">二、国能会接入说明</div>
           <p v-if="isGnMeeting" class="gn-hint">
-            审批通过后，系统将自动创建国能会会议号并通知参会人员。请确认主题、时间与参会名单无误。
+            核对无误后点击「创建」，系统将立即创建国能会会议号并同步会议链接与密码至智能办公助手。
           </p>
 
-          <div class="section-title">{{ isGnMeeting ? '三' : '二' }}、审批流程</div>
-          <div class="approval-flow">
+          <div v-if="!isGnMeeting" class="section-title">二、审批流程</div>
+          <div v-if="!isGnMeeting" class="approval-flow">
             <div
               v-for="(node, idx) in approvalChain"
               :key="node.role"
@@ -277,24 +306,29 @@ onMounted(load)
 
         <footer class="oa-footer">
           <p class="footer-note">
-            演示说明：首次点击「提交审批」进入审批中；再次点击灰色「已提交审批」可模拟全流程通过并同步回助手。
+            <template v-if="isGnMeeting">
+              国能会议无需审批：核对信息后点击「创建」即可完成，创建结果将自动同步回智能办公助手。
+            </template>
+            <template v-else>
+              演示说明：首次点击「提交审批」进入审批中；再次点击灰色「已提交审批」可模拟全流程通过并同步回助手。
+            </template>
           </p>
           <div class="footer-actions">
             <button type="button" class="btn-secondary" @click="closeWindow">关闭窗口</button>
             <button
               type="button"
               class="btn-primary"
-              :class="{ submitted: isPrimaryButtonSubmittedStyle(phase) }"
-              :disabled="isPrimaryButtonDisabled(phase, submitting)"
+              :class="{ submitted: primarySubmittedStyle }"
+              :disabled="primaryDisabled"
               @click="handlePrimaryClick"
             >
-              {{ primaryButtonLabel(phase, submitting) }}
+              {{ primaryLabel }}
             </button>
           </div>
         </footer>
 
         <div v-if="toastMessage" class="submit-toast">
-          <strong>{{ phase === 'approved' ? '审批完成' : '提交成功' }}</strong>
+          <strong>{{ isGnMeeting ? '创建成功' : (phase === 'approved' ? '审批完成' : '提交成功') }}</strong>
           <p>{{ toastMessage }}</p>
         </div>
       </template>

@@ -102,6 +102,14 @@ def _normalize_time(hour: int, minute: int = 0) -> str:
     return f"{hour:02d}:{minute:02d}"
 
 
+def _time_input_hint(value: str | None, fallback: str) -> str:
+    raw = (value or fallback).strip()
+    match = re.match(r"^(\d{1,2}):(\d{2})", raw)
+    if not match:
+        return fallback
+    return f"{int(match.group(1)):02d}:{match.group(2)}"
+
+
 def _add_one_hour(start: str) -> str:
     hour, minute = [int(part) for part in start.split(":", 1)]
     end_hour = hour + 1
@@ -195,7 +203,14 @@ def resolve_meeting_datetime(
     today = today or date.today()
     meeting_date = today
     if plan.date_hint:
-        if "今天" in plan.date_hint or "今晚" in plan.date_hint:
+        iso_match = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", plan.date_hint.strip())
+        if iso_match:
+            meeting_date = date(
+                int(iso_match.group(1)),
+                int(iso_match.group(2)),
+                int(iso_match.group(3)),
+            )
+        elif "今天" in plan.date_hint or "今晚" in plan.date_hint:
             meeting_date = today
         elif "明天" in plan.date_hint:
             meeting_date = today + timedelta(days=1)
@@ -417,7 +432,7 @@ def _time_display(plan: MeetingPlan) -> str:
 
 def meeting_plan_confirm_items(plan: MeetingPlan) -> list[dict[str, str]]:
     items = [
-        _plan_item("会议主题", plan.subject or "工作会议"),
+        _plan_item("会议名称", plan.subject or "工作会议"),
         _plan_item("会议室", _room_display(plan)),
         _plan_item("会议时间", _time_display(plan)),
     ]
@@ -444,7 +459,7 @@ def is_meeting_plan_update(text: str) -> bool:
 
 def build_meeting_plan_confirm_items(plan: MeetingPlan) -> list[dict[str, str]]:
     items = [
-        {"label": "会议主题", "value": plan.subject or "工作会议"},
+        {"label": "会议名称", "value": plan.subject or "工作会议"},
     ]
     if plan.needs_room_booking:
         items.append({"label": "会议室", "value": _room_display(plan)})
@@ -469,7 +484,6 @@ def build_meeting_plan_confirm_content(plan: MeetingPlan, *, updated: bool = Fal
     lines = [intro, ""]
     for item in build_meeting_plan_confirm_items(plan):
         lines.append(f"- {item['label']}：{item['value']}")
-    time_options = build_meeting_time_options(plan)
     if mode == "combined":
         lines.extend(
             [
@@ -481,14 +495,14 @@ def build_meeting_plan_confirm_content(plan: MeetingPlan, *, updated: bool = Fal
         lines.extend(
             [
                 "",
-                "👇 此为线上国能会议预约，确认后将进入 OA 提交审批；审批通过后将返回会议链接与密码。",
+                "👇 此为线上国能会议预约，确认后将跳转 OA 页面，核对信息并点击「创建」即可完成。",
             ]
         )
-    elif time_options:
+    elif plan.needs_room_booking:
         lines.extend(
             [
                 "",
-                "若会议时间理解有误，可在下方卡片中点选其他时段；确认后将进入会议室选择。",
+                "若会议时间理解有误，可在下方卡片中直接修改日期与时间；确认后将进入会议室选择。",
             ]
         )
     elif plan.room_flexible:
@@ -512,7 +526,6 @@ def build_meeting_plan_confirm_metadata(plan: MeetingPlan) -> dict:
     from src.integrations.mock_meeting_provider import list_room_presets
 
     mode = meeting_plan_mode(plan)
-    time_options = build_meeting_time_options(plan)
     confirm_label = "确认开始办理"
     if mode == "combined":
         confirm_label = "确认并办理（国能会议 + 会议室）"
@@ -520,6 +533,10 @@ def build_meeting_plan_confirm_metadata(plan: MeetingPlan) -> dict:
         confirm_label = "确认并开始国能会议预约"
     elif plan.room_flexible:
         confirm_label = "确认并选择会议室"
+
+    schedule = resolve_meeting_datetime(plan)
+    start = _time_input_hint(plan.start_hint, "14:00")
+    end = _time_input_hint(plan.end_hint, _add_one_hour(start))
 
     meta: dict = {
         "status": "pending",
@@ -533,14 +550,15 @@ def build_meeting_plan_confirm_metadata(plan: MeetingPlan) -> dict:
         "selected_room": plan.room,
         "room_flexible": plan.room_flexible,
         "attendees": plan.attendees or "",
-        "attendees_hint": "填写参会人员，多人用顿号分隔",
+        "attendees_hint": "填写参会人姓名、邮箱或国能工号，多人用顿号/逗号分隔",
+        "date_hint": schedule["meeting_date"],
+        "start_hint": start,
+        "end_hint": end,
+        "time_hint": "可直接修改日期、开始与结束时间",
     }
     if plan.needs_room_booking:
         meta["room_options"] = list_room_presets()
         meta["room_hint"] = "点选备选会议室、灵活选择，或在输入框填写会议室名称"
-    if time_options:
-        meta["time_options"] = time_options
-        meta["time_hint"] = "会议时间（点选确认，默认已按您的描述推断）"
     return {
         "interactive": True,
         "meeting_plan_confirm": meta,
@@ -637,8 +655,8 @@ def build_gn_execution_summary(plan: MeetingPlan, task_id: str, time_label: str)
             f"- 形式：**国能会议（线上/视频）**",
             "",
             "二、后续步骤",
-            "- 请在任务卡片中点击「确认继续」，跳转 OA 提交审批",
-            "- 审批通过后将返回**会议链接**与**会议密码**，支持一键复制",
+            "- 请在任务卡片中点击「确认继续」，跳转 OA 核对会议信息",
+            "- 点击「创建」后将返回**会议链接**与**会议密码**，支持一键复制",
             "",
             "请点击下方任务卡片查看详情。",
         ]
@@ -688,8 +706,9 @@ def build_combined_execution_summary(
             f"- 时间：{time_label}",
             "",
             "三、后续步骤",
-            "- 下方有两个任务卡片，请分别点击「确认继续」并完成 OA 审批",
-            "- 国能会议审批通过后将返回会议链接与密码",
+            "- 下方有两个任务卡片，请分别点击「确认继续」并完成 OA 办理",
+            "- 国能会议在 OA 页面点击「创建」即可；线下会议室仍需提交审批",
+            "- 国能会议创建成功后将返回会议链接与密码",
             "- 会议室审批通过后将展示完整预约信息",
         ]
     )

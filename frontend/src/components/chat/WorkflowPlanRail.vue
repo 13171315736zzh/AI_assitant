@@ -10,12 +10,17 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   toggle: []
-  openTask: [taskId: string]
+  focusNode: [node: WorkflowPlanNode]
 }>()
 
 const completedCount = computed(
   () => props.plan.nodes.filter((node) => node.status === 'completed').length,
 )
+
+function nodeDisplayLabel(node: WorkflowPlanNode): string {
+  if (node.id === 'gn_meeting') return '国能会'
+  return node.label
+}
 
 function nodeClass(node: WorkflowPlanNode) {
   return [
@@ -26,9 +31,7 @@ function nodeClass(node: WorkflowPlanNode) {
 }
 
 function handleNodeClick(node: WorkflowPlanNode) {
-  if (node.task_id) {
-    emit('openTask', node.task_id)
-  }
+  emit('focusNode', node)
 }
 </script>
 
@@ -52,11 +55,10 @@ function handleNodeClick(node: WorkflowPlanNode) {
               type="button"
               class="node-button"
               :class="nodeClass(node)"
-              :disabled="!node.task_id"
-              :title="nodeStatusLabel(node.status)"
+              :title="`${nodeStatusLabel(node.status)} · ${node.status === 'completed' ? '点击查看相关对话' : '点击开始办理或查看进度'}`"
               @click="handleNodeClick(node)"
             >
-              <span class="node-label">{{ node.label }}</span>
+              <span class="node-label">{{ nodeDisplayLabel(node) }}</span>
             </button>
           </div>
         </div>
@@ -170,7 +172,7 @@ function handleNodeClick(node: WorkflowPlanNode) {
   border: 2px solid #cbd5e1;
   background: var(--surface);
   color: var(--text);
-  cursor: default;
+  cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -178,11 +180,7 @@ function handleNodeClick(node: WorkflowPlanNode) {
   transition: border-color 0.2s, background 0.2s, transform 0.15s;
 }
 
-.node-button:not(:disabled) {
-  cursor: pointer;
-}
-
-.node-button:not(:disabled):hover {
+.node-button:hover {
   transform: translateY(-1px);
 }
 

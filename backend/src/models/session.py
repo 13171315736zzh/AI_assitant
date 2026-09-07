@@ -43,6 +43,7 @@ class MessageCreate(BaseModel):
 
 class BookingSelectionConfirm(BaseModel):
     flight_no: str | None = None
+    train_no: str | None = None
     hotel_name: str | None = None
 
 
@@ -84,6 +85,21 @@ class InfoCollectPlanConfirm(BaseModel):
 class PlanConfirm(BaseModel):
     confirmed: bool = True
     supplementary_content: str | None = Field(default=None, max_length=8000)
+
+
+class EmailPlanConfirm(PlanConfirm):
+    recipient: str | None = Field(default=None, max_length=128)
+    cc: str | None = Field(default=None, max_length=256)
+    subject: str | None = Field(default=None, max_length=256)
+    body: str | None = Field(default=None, max_length=8000)
+    signature: str | None = Field(default=None, max_length=256)
+    origin: str | None = Field(default=None, max_length=64)
+    destination: str | None = Field(default=None, max_length=64)
+    start_date: str | None = Field(default=None, max_length=16)
+    end_date: str | None = Field(default=None, max_length=16)
+    purpose: str | None = Field(default=None, max_length=500)
+    transport_mode: str | None = Field(default=None, max_length=16)
+    transport_other: str | None = Field(default=None, max_length=64)
 
 
 class MeetingPlanConfirm(PlanConfirm):

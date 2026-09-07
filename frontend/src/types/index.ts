@@ -77,6 +77,17 @@ export interface FlightOption {
   price: number
 }
 
+export interface TrainOption {
+  train_no: string
+  train_type: string
+  origin: string
+  destination: string
+  departure_time: string
+  arrival_time: string
+  seat_class: string
+  price: number
+}
+
 export interface HotelOption {
   name: string
   address: string
@@ -89,10 +100,13 @@ export interface HotelOption {
 
 export interface BookingSelectionMeta {
   status: 'pending' | 'confirmed'
+  booking_kind?: 'transport' | 'hotel'
+  transport_type?: 'flight' | 'train'
   needs_flight: boolean
   needs_hotel: boolean
   destination: string
   flights: FlightOption[]
+  trains?: TrainOption[]
   hotels: HotelOption[]
 }
 
@@ -199,6 +213,36 @@ export interface PlanConfirmMeta {
   confirm_label?: string
 }
 
+export interface TravelPlanConfirmMeta extends PlanConfirmMeta {
+  origin?: string
+  destination?: string
+  start_date?: string
+  end_date?: string
+  purpose?: string
+  transport_mode?: string
+  transport_other?: string
+}
+
+export interface EmailPlanConfirmMeta extends PlanConfirmMeta {
+  email_only: true
+  recipient?: string
+  cc?: string
+  subject?: string
+  body?: string
+  signature?: string
+}
+
+export interface EmailComposeMeta {
+  task_id: string
+  session_id?: string
+  form_id?: string
+  recipient: string
+  cc: string
+  subject: string
+  body: string
+  signature: string
+}
+
 export interface MeetingTimeOption {
   label: string
   date_hint: string
@@ -226,6 +270,9 @@ export interface MeetingPlanConfirmMeta extends PlanConfirmMeta {
   room_flexible?: boolean
   subject?: string
   attendees?: string
+  date_hint?: string
+  start_hint?: string
+  end_hint?: string
   room_hint?: string
   attendees_hint?: string
 }
@@ -253,6 +300,11 @@ export interface RelatedTaskMeta {
   progress_percent: number
   steps_desc: string
   meeting_kind?: 'gn' | 'room'
+  booking_kind?: 'transport' | 'hotel'
+}
+
+export interface WorkflowSessionSummary {
+  text: string
 }
 
 export interface InfoCollectPlanConfirmMeta {

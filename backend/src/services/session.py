@@ -179,14 +179,24 @@ class SessionService:
         *,
         card_draft: dict | None = None,
     ) -> tuple[str, str, dict | None]:
+        from src.agent.workflow_plan import prepare_workflow_route
+
         db = self.session_repo.db
-        for workflow_svc, kwargs in (
-            (MeetingWorkflowService(db), {}),
-            (WorkpackageWorkflowService(db), {}),
-            (LeaveWorkflowService(db), {}),
-            (InfoCollectWorkflowService(db), {}),
-            (TravelWorkflowService(db), {"staff_level": travel_staff_level}),
-        ):
+        preferred_service = await prepare_workflow_route(
+            self.message_repo, session_id, content
+        )
+        workflow_entries: list[tuple[str, object, dict]] = [
+            ("meeting", MeetingWorkflowService(db), {}),
+            ("workpackage", WorkpackageWorkflowService(db), {}),
+            ("leave", LeaveWorkflowService(db), {}),
+            ("info_collect", InfoCollectWorkflowService(db), {}),
+            ("travel", TravelWorkflowService(db), {"staff_level": travel_staff_level}),
+        ]
+        if preferred_service:
+            workflow_entries.sort(
+                key=lambda item: 0 if item[0] == preferred_service else 1
+            )
+        for _, workflow_svc, kwargs in workflow_entries:
             workflow = await workflow_svc.try_execute(
                 user_id,
                 session_id,
@@ -304,6 +314,7 @@ class SessionService:
         user_id: int,
         session_id: str,
         flight_no: str | None,
+        train_no: str | None,
         hotel_name: str | None,
     ) -> tuple[MessagePublic, MessagePublic, str] | None | str:
         record = await self._prepare_send(user_id, session_id)
@@ -320,6 +331,7 @@ class SessionService:
             user_id,
             session_id,
             flight_no=flight_no,
+            train_no=train_no,
             hotel_name=hotel_name,
             staff_level=travel_staff_level,
         )
@@ -327,7 +339,9 @@ class SessionService:
             return None
 
         summary_parts = ["已确认预订方案"]
-        if flight_no:
+        if train_no:
+            summary_parts.append(f"车次 {train_no}")
+        elif flight_no:
             summary_parts.append(f"航班 {flight_no}")
         if hotel_name:
             summary_parts.append(f"酒店 {hotel_name}")
@@ -516,14 +530,36 @@ class SessionService:
         session_id: str,
         *,
         supplementary_content: str | None = None,
+        recipient: str | None = None,
+        cc: str | None = None,
+        subject: str | None = None,
+        body: str | None = None,
+        signature: str | None = None,
+        origin: str | None = None,
+        destination: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        purpose: str | None = None,
+        transport_mode: str | None = None,
+        transport_other: str | None = None,
+        card_draft: dict | None = None,
     ) -> tuple[MessagePublic, MessagePublic, str] | None | str:
+        from src.agent.workflow_confirm import get_pending_meta
+
         record = await self._prepare_send(user_id, session_id)
         if record is None:
             return None
         if record == "ended":
             return "ended"
 
-        user_content = _confirm_user_content("确认开始办理出差安排", supplementary_content)
+        _, pending = await get_pending_meta(
+            self.message_repo, session_id, "travel_plan_confirm"
+        )
+        default_label = "确认开始办理出差安排"
+        if pending and pending.get("email_only"):
+            default_label = "确认并开始写邮件"
+
+        user_content = _confirm_user_content(default_label, supplementary_content)
         _, confirmed_position, travel_staff_level = await self._prepare_agent_context(
             user_id, session_id, user_content
         )
@@ -533,6 +569,19 @@ class SessionService:
             session_id,
             staff_level=travel_staff_level,
             supplementary_content=supplementary_content,
+            recipient=recipient,
+            cc=cc,
+            subject=subject,
+            body=body,
+            signature=signature,
+            origin=origin,
+            destination=destination,
+            start_date=start_date,
+            end_date=end_date,
+            purpose=purpose,
+            transport_mode=transport_mode,
+            transport_other=transport_other,
+            card_draft=card_draft,
         )
         if not workflow:
             return None

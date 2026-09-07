@@ -13,9 +13,8 @@ import DocumentPreviewModal from '@/components/chat/DocumentPreviewModal.vue'
 import BusinessFormPanel from '@/components/chat/BusinessFormPanel.vue'
 import ConfirmDialog from '@/components/chat/ConfirmDialog.vue'
 import WorkflowPlanRail from '@/components/chat/WorkflowPlanRail.vue'
-import { useOaTaskSync } from '@/composables/useOaTaskSync'
-import type { MessageSource, Session } from '@/types'
-import { extractWorkflowPlan, workflowPlanVisible } from '@/utils/workflowPlan'
+import type { MessageSource, Session, WorkflowPlanNode } from '@/types'
+import { extractWorkflowPlan, findLatestMessageForNode, nodeActivationPrompt, workflowPlanVisible } from '@/utils/workflowPlan'
 
 const chat = useChatStore()
 const auth = useAuthStore()
@@ -29,6 +28,7 @@ const deleteTarget = ref<Session | null>(null)
 const deleting = ref(false)
 const workflowRailExpanded = ref(false)
 const userCollapsedRail = ref(false)
+const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
 
 const workflowPlan = computed(() => extractWorkflowPlan(chat.messages))
 const showWorkflowRail = computed(() => workflowPlanVisible(workflowPlan.value))
@@ -71,10 +71,6 @@ onMounted(async () => {
     }
     router.replace({ name: 'chat' })
   }
-})
-
-useOaTaskSync((payload) => {
-  void chat.handleOaTaskUpdate(payload)
 })
 
 watch(
@@ -138,6 +134,28 @@ function closePanels() {
 function openSource(source: MessageSource) {
   previewSource.value = source
 }
+
+async function focusWorkflowNode(node: WorkflowPlanNode) {
+  const target = findLatestMessageForNode(chat.displayMessages, node)
+  if (target) {
+    const ok = await messageListRef.value?.scrollToMessage(target.id)
+    if (!ok) {
+      alert(`暂未找到「${node.label}」相关对话`)
+    }
+    return
+  }
+
+  if (node.status === 'completed') {
+    alert(`「${node.label}」已完成，暂未找到相关对话记录`)
+    return
+  }
+
+  if (chat.isActiveSessionEnded || chat.sending) {
+    return
+  }
+
+  await chat.send(nodeActivationPrompt(node.id, node.label))
+}
 </script>
 
 <template>
@@ -161,10 +179,11 @@ function openSource(source: MessageSource) {
         :plan="workflowPlan"
         :expanded="workflowRailExpanded"
         @toggle="toggleWorkflowRail"
-        @open-task="openTask"
+        @focus-node="focusWorkflowNode"
       />
 
       <MessageList
+        ref="messageListRef"
         :messages="chat.displayMessages"
         :workflow-submitting="chat.workflowSubmitting"
         :quick-actions-disabled="chat.isActiveSessionEnded || chat.sending"

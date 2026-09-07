@@ -37,7 +37,13 @@ from src.agent.workflow_confirm import (
     mark_meta_confirmed,
     mark_meta_superseded,
 )
-from src.agent.workflow_plan import link_task_to_plan
+from src.agent.workflow_plan import (
+    activated_plan_node,
+    get_workflow_plan_from_session,
+    is_parallel_workflow_plan,
+    link_task_to_plan,
+    should_service_handle_activation,
+)
 from src.db.task_models import TaskRecord
 from src.integrations.mock_meeting_provider import (
     query_available_projection_rooms,
@@ -89,8 +95,23 @@ class MeetingWorkflowService:
         )
         has_pending_plan_flag = has_pending_plan(pending_plan)
 
-        if not is_meeting_workflow_intent(ctx.combined_text):
+        wf_plan = await get_workflow_plan_from_session(self.message_repo, session_id)
+        parallel_plan = is_parallel_workflow_plan(wf_plan)
+        activated_meeting = activated_plan_node(user_content, wf_plan) in (
+            "room",
+            "gn_meeting",
+        )
+        if parallel_plan and not should_service_handle_activation(
+            "meeting", user_content, wf_plan
+        ):
             if not (has_pending_plan_flag and is_meeting_plan_update(user_content)):
+                return None
+
+        if not is_meeting_workflow_intent(ctx.combined_text):
+            if not (
+                (has_pending_plan_flag and is_meeting_plan_update(user_content))
+                or activated_meeting
+            ):
                 return None
 
         plan = build_meeting_plan(ctx.user_messages)

@@ -10,6 +10,8 @@ _CATEGORY_LABELS = {
     "leave": "请假申请",
     "email": "邮件撰写",
     "info_collect": "信息收集",
+    "transport_book": "交通预订",
+    "hotel_book": "酒店预订",
     "other": "综合办事",
 }
 
@@ -39,6 +41,10 @@ def infer_category(steps: list[dict]) -> str:
         return "gn_meeting"
     if "meeting_book" in tools or "room_book" in tools:
         return "meeting"
+    if "flight_book" in tools and "travel_apply" not in tools and "hotel_book" not in tools:
+        return "transport_book"
+    if "hotel_book" in tools and "travel_apply" not in tools and "flight_book" not in tools:
+        return "hotel_book"
     if "travel_apply" in tools or "flight_book" in tools or "hotel_book" in tools:
         return "travel"
     if "email_notify" in tools:

@@ -7,6 +7,7 @@ import { fetchForm } from '@/services/formService'
 import { formFieldLabels } from '@/mocks/forms'
 import type { FlightOption, HotelOption, Task } from '@/types'
 import {
+  buildOaNotifyPayload,
   buildTravelApprovalChain,
   detectOaPhase,
   isPrimaryButtonDisabled,
@@ -113,11 +114,7 @@ async function handlePrimaryClick() {
       task.value = res.data.task
       phase.value = 'submitted'
       toastMessage.value = `差旅申请 ${applicationNo.value} 已进入 OA 审批流程（演示）。再次点击灰色按钮可模拟审批通过。`
-      notifyAssistantOaUpdate({
-        sessionId: res.data.session_id,
-        taskId: taskId.value,
-        action: 'submitted',
-      })
+      notifyAssistantOaUpdate(buildOaNotifyPayload(res.data, taskId.value, 'submitted'))
       return
     }
 
@@ -130,11 +127,7 @@ async function handlePrimaryClick() {
       task.value = res.data.task
       phase.value = 'approved'
       toastMessage.value = '审批已全部通过，状态已同步至智能办公助手。'
-      notifyAssistantOaUpdate({
-        sessionId: res.data.session_id,
-        taskId: taskId.value,
-        action: 'completed',
-      })
+      notifyAssistantOaUpdate(buildOaNotifyPayload(res.data, taskId.value, 'completed'))
     }
   } catch {
     error.value = '操作失败，请返回助手重试'

@@ -15,6 +15,7 @@ from src.models.session import (
     SessionCreate,
     SessionUpdate,
     PlanConfirm,
+    EmailPlanConfirm,
     WorkpackageConfirm,
     WorkpackagePlanConfirm,
     LeavePlanConfirm,
@@ -208,6 +209,7 @@ async def confirm_booking_selection(
         current_user.id,
         session_id,
         body.flight_no,
+        body.train_no,
         body.hotel_name,
     )
     if result is None:
@@ -233,19 +235,54 @@ async def confirm_booking_selection(
 @router.post("/{session_id}/travel-plan-confirm")
 async def confirm_travel_plan(
     session_id: str,
-    body: PlanConfirm,
+    body: EmailPlanConfirm,
     current_user: UserPublic = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    svc = _service(db)
+    card_draft = {
+        "meta_key": "travel_plan_confirm",
+        "payload": {
+            key: value
+            for key, value in {
+                "origin": body.origin,
+                "destination": body.destination,
+                "start_date": body.start_date,
+                "end_date": body.end_date,
+                "purpose": body.purpose,
+                "transport_mode": body.transport_mode,
+                "transport_other": body.transport_other,
+                "recipient": body.recipient,
+                "cc": body.cc,
+                "subject": body.subject,
+                "body": body.body,
+                "signature": body.signature,
+            }.items()
+            if value is not None
+        },
+    }
     result = await svc.confirm_travel_plan(
         current_user.id,
         session_id,
         supplementary_content=body.supplementary_content,
+        recipient=body.recipient,
+        cc=body.cc,
+        subject=body.subject,
+        body=body.body,
+        signature=body.signature,
+        origin=body.origin,
+        destination=body.destination,
+        start_date=body.start_date,
+        end_date=body.end_date,
+        purpose=body.purpose,
+        transport_mode=body.transport_mode,
+        transport_other=body.transport_other,
+        card_draft=card_draft if card_draft["payload"] else None,
     )
     if result is None:
         return JSONResponse(
             status_code=400,
-            content=error("无法确认出差安排，请重试", code=400),
+            content=error("无法确认安排，请重试", code=400),
         )
     if result == "ended":
         return JSONResponse(

@@ -70,6 +70,33 @@ _FORM_TEMPLATES: dict[str, tuple[str, dict[str, str]]] = {
             "body": "赵士廷经理，您好！\n\n烦请知悉，我计划于下周三前往神东项目现场…\n\n此致\n敬礼",
         },
     ),
+    "transport_book": (
+        "交通预订",
+        {
+            "passenger_name": "",
+            "id_number": "",
+            "phone": "",
+            "departure_date": "",
+            "departure_time": "",
+            "flight_no": "",
+            "origin": "",
+            "destination": "",
+            "amount": "",
+        },
+    ),
+    "hotel_book": (
+        "酒店预订",
+        {
+            "guest_name": "",
+            "id_number": "",
+            "phone": "",
+            "check_in": "",
+            "check_out": "",
+            "hotel_name": "",
+            "room_type": "",
+            "amount": "",
+        },
+    ),
     "info_collect": (
         "信息收集",
         {
@@ -90,6 +117,8 @@ _SUBMIT_MESSAGES = {
     "gn_meeting": "国能会议预约已提交",
     "email": "邮件已发送",
     "info_collect": "信息收集已发布",
+    "transport_book": "交通预订已提交",
+    "hotel_book": "酒店预订已提交",
 }
 
 

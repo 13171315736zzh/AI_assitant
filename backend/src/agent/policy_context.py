@@ -66,8 +66,18 @@ def is_non_travel_workflow_intent(text: str) -> bool:
     )
 
 
+def is_email_workflow_metadata(metadata: dict | None) -> bool:
+    """写邮件确认卡（与差旅无关）。"""
+    if not metadata:
+        return False
+    confirm = metadata.get("travel_plan_confirm")
+    return isinstance(confirm, dict) and bool(confirm.get("email_only"))
+
+
 def is_travel_workflow_metadata(metadata: dict | None) -> bool:
     if not metadata:
+        return False
+    if is_email_workflow_metadata(metadata):
         return False
     return any(metadata.get(key) for key in _TRAVEL_WORKFLOW_META_KEYS)
 
@@ -100,6 +110,8 @@ async def should_skip_travel_reminders(
     """非差旅办事（含确认卡片）及纯非差旅意图时，不展示差旅建议/规定提醒。"""
     from src.agent.workflow_confirm import get_pending_meta
 
+    if is_email_workflow_metadata(metadata):
+        return True
     if is_travel_workflow_metadata(metadata):
         return False
     if is_non_travel_workflow_metadata(metadata):
@@ -109,6 +121,10 @@ async def should_skip_travel_reminders(
         _, pending = await get_pending_meta(message_repo, session_id, key)
         if pending:
             return True
+
+    _, pending_travel = await get_pending_meta(message_repo, session_id, "travel_plan_confirm")
+    if pending_travel and pending_travel.get("email_only"):
+        return True
 
     probe = workflow_probe_text(session_text)
     if is_non_travel_workflow_intent(probe):

@@ -16,7 +16,7 @@ from src.agent.session_context import is_plan_revision_text, merge_user_texts
 from src.agent.user_memory import extract_position, is_position_confirmed
 
 _INFO_COLLECT_INTENT = re.compile(
-    r"信息收集|信息采集|个人信息|个人资料|完善信息|完善资料|"
+    r"填信息|信息收集|信息采集|个人信息|个人资料|完善信息|完善资料|"
     r"录入信息|填写个人信息|长期记忆|核心信息|我的信息"
 )
 

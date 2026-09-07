@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
@@ -24,7 +25,15 @@ from src.repositories.task import TaskRepository
 from src.services.form import FormService
 from src.integrations.mock_meeting_provider import generate_gn_meeting_credentials
 
-_APPLY_TOOLS = ("workpackage_fill", "leave_apply", "travel_apply", "meeting_book", "gn_meeting_book")
+_APPLY_TOOLS = (
+    "workpackage_fill",
+    "leave_apply",
+    "travel_apply",
+    "meeting_book",
+    "gn_meeting_book",
+    "flight_book",
+    "hotel_book",
+)
 
 _COMPLETION_COPY = {
     "workpackage": {
@@ -46,6 +55,14 @@ _COMPLETION_COPY = {
     "gn_meeting": {
         "title": "国能会议",
         "chain": "会议组织岗 → 部门负责人 → IT 支持岗",
+    },
+    "transport_book": {
+        "title": "交通预订",
+        "chain": "行政审批 → 出票确认",
+    },
+    "hotel_book": {
+        "title": "酒店预订",
+        "chain": "行政审批 → 预订确认",
     },
 }
 
@@ -99,6 +116,35 @@ def _form_id_from_step(step: dict | None) -> str | None:
     return str(form_id) if form_id else None
 
 
+async def _sync_related_task_cards(
+    message_repo,
+    session_id: str,
+    task_id: str,
+    task_record,
+    steps_desc: str,
+) -> None:
+    records = await message_repo.list_recent_for_context(session_id, limit=40)
+    total = task_record.total_steps or len(task_record.steps_json or []) or 2
+    for record in records:
+        meta = dict(record.metadata_json or {})
+        related = meta.get("related_tasks")
+        if not isinstance(related, list):
+            continue
+        changed = False
+        for item in related:
+            if not isinstance(item, dict) or item.get("task_id") != task_id:
+                continue
+            item["progress"] = f"{total}/{total}"
+            item["progress_percent"] = 100
+            base = str(item.get("steps_desc") or steps_desc).split(" · ")[0]
+            item["steps_desc"] = f"{base} · 已完成"
+            changed = True
+        if changed:
+            meta["related_tasks"] = related
+            await message_repo.update(record, metadata_json=meta)
+            return
+
+
 def _build_completion_content(category: str, task_title: str, receipt_id: str | None) -> str:
     copy = _COMPLETION_COPY.get(category, {"title": "业务办理", "chain": "相关审批节点"})
     receipt_line = f"\n- 回执单号：**{receipt_id}**" if receipt_id else ""
@@ -107,7 +153,8 @@ def _build_completion_content(category: str, task_title: str, receipt_id: str | 
             [
                 f"✅ **{task_title or copy['title']}已创建**",
                 "",
-                f"OA 审批已通过（{copy['chain']}）。请在下方卡片中复制会议链接与密码。{receipt_line}",
+                "会议已在国能会议系统中创建成功，请在下方卡片中复制会议链接与密码。",
+                receipt_line,
             ]
         )
     if category == "meeting":
@@ -350,13 +397,38 @@ class TaskService:
             steps_json=steps,
             current_step=confirm_step["step_id"] if confirm_step else record.current_step,
         )
-        await update_plan_for_task(
+        updated_plan = await update_plan_for_task(
             self.message_repo, updated.session_id, task_id, "submitted", task_steps=steps
+        )
+        assistant_record = None
+        if updated_plan:
+            guidance, guidance_meta = await build_next_node_guidance(
+                self.message_repo, updated.session_id, updated_plan
+            )
+            if guidance.strip():
+                assistant_record = await self.message_repo.create(
+                    updated.session_id,
+                    "assistant",
+                    guidance,
+                    "text",
+                    metadata=guidance_meta,
+                )
+                session_record = await self.session_repo.get_by_id(
+                    updated.session_id, user_id
+                )
+                if session_record is not None:
+                    session_record.message_count += 1
+                    await self.session_repo.update(session_record)
+        assistant_message = (
+            _to_message_public(assistant_record).model_dump()
+            if assistant_record is not None
+            else None
         )
         return OaTaskActionPublic(
             task=_to_task_public(updated),
             session_id=updated.session_id,
             receipt_id=receipt_id,
+            assistant_message=assistant_message,
         )
 
     async def approve_oa_application(
@@ -426,6 +498,14 @@ class TaskService:
             )
             await self.message_repo.update(task_message, metadata_json=meta)
 
+        await _sync_related_task_cards(
+            self.message_repo,
+            updated.session_id,
+            task_id,
+            updated,
+            steps_desc,
+        )
+
         updated_plan = await update_plan_for_task(
             self.message_repo, updated.session_id, task_id, "completed", task_steps=steps
         )
@@ -457,5 +537,164 @@ class TaskService:
             task=_to_task_public(updated),
             session_id=updated.session_id,
             receipt_id=receipt_id,
+            assistant_message=_to_message_public(assistant_record).model_dump(),
+        )
+
+    async def create_gn_meeting(
+        self, user_id: int, task_id: str
+    ) -> OaTaskActionPublic | None:
+        """国能会议：用户确认后直接创建，无需 OA 审批流程。"""
+        record = await self.task_repo.get_by_id(task_id, user_id)
+        if record is None or record.status == "cancelled":
+            return None
+        category = infer_category(record.steps_json or [])
+        if category != "gn_meeting":
+            return None
+        if record.status == "completed":
+            recent = await self.message_repo.list_recent_for_context(
+                record.session_id, limit=12
+            )
+            assistant_msg = None
+            for msg in reversed(recent):
+                meta = msg.metadata_json or {}
+                if meta.get("gn_meeting_result") and meta.get("task_id") == task_id:
+                    assistant_msg = _to_message_public(msg).model_dump()
+                    break
+            return OaTaskActionPublic(
+                task=_to_task_public(record),
+                session_id=record.session_id,
+                assistant_message=assistant_msg,
+            )
+        return await self.approve_oa_application(user_id, task_id)
+
+    async def confirm_email_sent(
+        self,
+        user_id: int,
+        task_id: str,
+        *,
+        recipient: str | None = None,
+        subject: str | None = None,
+        message_id: str | None = None,
+    ) -> OaTaskActionPublic | None:
+        record = await self.task_repo.get_by_id(task_id, user_id)
+        if record is None or record.status == "cancelled":
+            return None
+
+        steps = deepcopy(record.steps_json or [])
+        if not any(step.get("tool") == "email_notify" for step in steps):
+            return None
+
+        if record.status == "completed":
+            assistant_msg = None
+            recent = await self.message_repo.list_recent_for_context(
+                record.session_id, limit=8
+            )
+            for msg in reversed(recent):
+                meta = msg.metadata_json or {}
+                if meta.get("email_sent_result") and meta.get("task_id") == task_id:
+                    assistant_msg = _to_message_public(msg).model_dump()
+                    break
+            return OaTaskActionPublic(
+                task=_to_task_public(record),
+                session_id=record.session_id,
+                assistant_message=assistant_msg,
+            )
+
+        now = datetime.now(UTC).isoformat()
+        sent_payload = {
+            "email_sent": True,
+            "sent_at": now,
+            "message_id": message_id,
+            "recipient": recipient,
+            "subject": subject,
+        }
+
+        for step in steps:
+            if step.get("tool") == "email_notify":
+                step["status"] = "completed"
+                step["result"] = {**(step.get("result") or {}), **sent_payload}
+            elif step.get("tool") == "user_confirm":
+                step["status"] = "completed"
+                step["result"] = dict(sent_payload)
+
+        task_message = await self.message_repo.find_task_message(
+            record.session_id, record.id
+        )
+        task_title = record.goal[:40]
+        if task_message and task_message.metadata_json:
+            meta = dict(task_message.metadata_json)
+            task_title = str(meta.get("task_title") or task_title)
+
+        recipient_label = (recipient or "").strip() or "收件人"
+        subject_label = (subject or "").strip() or task_title
+        completion_content = "\n".join(
+            [
+                "✅ **邮件已发送成功**",
+                "",
+                f"- 收件人：{recipient_label}",
+                f"- 主题：{subject_label}",
+                "",
+                "写邮件流程已全部完成（2/2）。您可在邮件「已发送」中查看或撤回（演示）。",
+            ]
+        )
+        assistant_metadata: dict[str, Any] = {
+            "email_sent_result": True,
+            "task_id": record.id,
+            "category": "email",
+        }
+
+        total_steps = record.total_steps or len(steps) or 2
+        updated = await self.task_repo.update(
+            record,
+            status="completed",
+            current_step=total_steps,
+            steps_json=steps,
+        )
+
+        if task_message and task_message.metadata_json:
+            meta = dict(task_message.metadata_json)
+            meta.update(
+                {
+                    "progress": f"{total_steps}/{total_steps}",
+                    "progress_percent": 100,
+                    "status": "completed",
+                    "steps_desc": "邮件撰写 · 已完成",
+                }
+            )
+            await self.message_repo.update(task_message, metadata_json=meta)
+
+        updated_plan = await update_plan_for_task(
+            self.message_repo,
+            updated.session_id,
+            task_id,
+            "completed",
+            task_steps=steps,
+        )
+        if updated_plan:
+            guidance, guidance_meta = await build_next_node_guidance(
+                self.message_repo, updated.session_id, updated_plan
+            )
+            completion_content = append_next_node_guidance(completion_content, guidance)
+            if guidance_meta:
+                assistant_metadata.update(guidance_meta)
+
+        assistant_record = await self.message_repo.create(
+            updated.session_id,
+            "assistant",
+            completion_content,
+            "text",
+            metadata=assistant_metadata,
+        )
+
+        session_record = await self.session_repo.get_by_id(
+            updated.session_id, user_id
+        )
+        if session_record is not None:
+            session_record.message_count += 1
+            await self.session_repo.update(session_record)
+
+        return OaTaskActionPublic(
+            task=_to_task_public(updated),
+            session_id=updated.session_id,
             assistant_message=_to_message_public(assistant_record).model_dump(),
         )

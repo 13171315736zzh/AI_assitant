@@ -199,7 +199,7 @@ export async function sendMessageStream(
 
 export async function confirmBookingSelection(
   sessionId: string,
-  payload: { flight_no?: string; hotel_name?: string },
+  payload: { flight_no?: string; train_no?: string; hotel_name?: string },
 ): Promise<
   ApiResponse<{
     user_message: Message
@@ -272,7 +272,21 @@ export async function confirmWorkpackageFill(
 
 export async function confirmTravelPlan(
   sessionId: string,
-  payload?: { supplementary_content?: string },
+  payload?: {
+    supplementary_content?: string
+    origin?: string
+    destination?: string
+    start_date?: string
+    end_date?: string
+    purpose?: string
+    transport_mode?: string
+    transport_other?: string
+    recipient?: string
+    cc?: string
+    subject?: string
+    body?: string
+    signature?: string
+  },
 ): Promise<
   ApiResponse<{
     user_message: Message
@@ -283,6 +297,18 @@ export async function confirmTravelPlan(
   const { data } = await api.post(`/sessions/${encodeURIComponent(sessionId)}/travel-plan-confirm`, {
     confirmed: true,
     supplementary_content: payload?.supplementary_content ?? null,
+    origin: payload?.origin ?? null,
+    destination: payload?.destination ?? null,
+    start_date: payload?.start_date ?? null,
+    end_date: payload?.end_date ?? null,
+    purpose: payload?.purpose ?? null,
+    transport_mode: payload?.transport_mode ?? null,
+    transport_other: payload?.transport_other ?? null,
+    recipient: payload?.recipient ?? null,
+    cc: payload?.cc ?? null,
+    subject: payload?.subject ?? null,
+    body: payload?.body ?? null,
+    signature: payload?.signature ?? null,
   })
   return data
 }

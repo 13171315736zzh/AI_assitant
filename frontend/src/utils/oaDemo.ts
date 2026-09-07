@@ -1,6 +1,7 @@
-import type { Task } from '@/types'
+import type { Message, Task } from '@/types'
 
 export const OA_TASK_EVENT = 'assistant:oa-task-update'
+const OA_BROADCAST_CHANNEL = 'assistant:oa-task-update'
 
 export type OaPhase = 'draft' | 'submitted' | 'approved'
 
@@ -15,6 +16,28 @@ export interface OaDemoPayload {
   sessionId: string
   taskId: string
   action: 'submitted' | 'completed'
+  assistantMessage?: Message | null
+  task?: Task | null
+}
+
+export interface OaTaskActionData {
+  session_id: string
+  task: Task
+  assistant_message?: Message | null
+}
+
+export function buildOaNotifyPayload(
+  data: OaTaskActionData,
+  taskId: string,
+  action: OaDemoPayload['action'],
+): OaDemoPayload {
+  return {
+    sessionId: data.session_id,
+    taskId,
+    action,
+    assistantMessage: data.assistant_message ?? null,
+    task: data.task,
+  }
 }
 
 export function detectOaPhase(task: Task | null): OaPhase {
@@ -26,12 +49,54 @@ export function detectOaPhase(task: Task | null): OaPhase {
   return 'draft'
 }
 
-export function notifyAssistantOaUpdate(payload: OaDemoPayload) {
-  const message = { type: OA_TASK_EVENT, ...payload }
+function postOaTaskEvent(message: { type: string } & OaDemoPayload) {
+  if (typeof BroadcastChannel !== 'undefined') {
+    const channel = new BroadcastChannel(OA_BROADCAST_CHANNEL)
+    channel.postMessage(message)
+    channel.close()
+  }
   if (window.opener && !window.opener.closed) {
     window.opener.postMessage(message, window.location.origin)
   }
   window.postMessage(message, window.location.origin)
+}
+
+export function notifyAssistantOaUpdate(payload: OaDemoPayload) {
+  postOaTaskEvent({ type: OA_TASK_EVENT, ...payload })
+}
+
+export function subscribeOaTaskUpdates(onUpdate: (payload: OaDemoPayload) => void): () => void {
+  function dispatch(raw: unknown) {
+    const data = raw as { type?: string } & Partial<OaDemoPayload>
+    if (data?.type !== OA_TASK_EVENT || !data.sessionId || !data.taskId || !data.action) {
+      return
+    }
+    onUpdate({
+      sessionId: data.sessionId,
+      taskId: data.taskId,
+      action: data.action,
+      assistantMessage: data.assistantMessage ?? null,
+      task: data.task ?? null,
+    })
+  }
+
+  function handleMessage(event: MessageEvent) {
+    if (event.origin !== window.location.origin) return
+    dispatch(event.data)
+  }
+
+  window.addEventListener('message', handleMessage)
+
+  let channel: BroadcastChannel | null = null
+  if (typeof BroadcastChannel !== 'undefined') {
+    channel = new BroadcastChannel(OA_BROADCAST_CHANNEL)
+    channel.onmessage = (event) => dispatch(event.data)
+  }
+
+  return () => {
+    window.removeEventListener('message', handleMessage)
+    channel?.close()
+  }
 }
 
 export function buildWorkpackageApprovalChain(
@@ -132,4 +197,20 @@ export function isPrimaryButtonDisabled(phase: OaPhase, submitting: boolean): bo
 
 export function isPrimaryButtonSubmittedStyle(phase: OaPhase): boolean {
   return phase === 'submitted' || phase === 'approved'
+}
+
+export function gnMeetingStatusBadge(phase: OaPhase): { label: string; class: string } {
+  if (phase === 'approved') return { label: '已创建', class: 'approved' }
+  return { label: '待创建', class: 'draft' }
+}
+
+export function gnMeetingPrimaryButtonLabel(phase: OaPhase, submitting: boolean): string {
+  if (submitting) return '处理中…'
+  if (phase === 'approved') return '已创建'
+  return '创建'
+}
+
+export function isGnMeetingPrimaryButtonDisabled(phase: OaPhase, submitting: boolean): boolean {
+  if (submitting) return true
+  return phase === 'approved'
 }

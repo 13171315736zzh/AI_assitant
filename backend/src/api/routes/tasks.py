@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.deps import get_current_user
 from src.api.responses import error, paginated, success
 from src.db.session import get_db
-from src.models.task import TaskConfirmRequest, TaskStepUpdateRequest
+from src.models.task import EmailSentRequest, TaskConfirmRequest, TaskStepUpdateRequest
 from src.models.user import UserPublic
 from src.services.task import TaskService
 
@@ -94,6 +94,29 @@ async def update_task_step(
     return success(task.model_dump())
 
 
+@router.post("/{task_id}/email-sent")
+async def confirm_email_sent(
+    task_id: str,
+    body: EmailSentRequest,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    result = await svc.confirm_email_sent(
+        current_user.id,
+        task_id,
+        recipient=body.recipient,
+        subject=body.subject,
+        message_id=body.message_id,
+    )
+    if result is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法确认邮件发送，请确认任务有效", code=400),
+        )
+    return success(result.model_dump())
+
+
 @router.post("/{task_id}/oa-submit")
 async def submit_oa_application(
     task_id: str,
@@ -122,5 +145,21 @@ async def approve_oa_application(
         return JSONResponse(
             status_code=400,
             content=error("无法完成 OA 审批，请确认任务与表单有效", code=400),
+        )
+    return success(result.model_dump())
+
+
+@router.post("/{task_id}/gn-meeting-create")
+async def create_gn_meeting(
+    task_id: str,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    result = await svc.create_gn_meeting(current_user.id, task_id)
+    if result is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法创建国能会议，请确认任务与表单有效", code=400),
         )
     return success(result.model_dump())

@@ -1,22 +1,43 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import type { GnMeetingResultMeta } from '@/types'
 
 const props = defineProps<{
   result: GnMeetingResultMeta
 }>()
 
-const copiedField = ref<string | null>(null)
+const copiedAll = ref(false)
 
-async function copyText(field: string, value: string) {
+const subject = computed(() => props.result.subject?.trim() || '国能会议')
+
+function formatMeetingNo(no: string): string {
+  const digits = no.replace(/\D/g, '')
+  if (digits.length === 9) {
+    return `${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6)}`
+  }
+  return no
+}
+
+function buildCopyAllText(): string {
+  const lines = [
+    `会议名称：${subject.value}`,
+    `会议号：${props.result.meeting_no}`,
+    `会议链接：${props.result.meeting_link}`,
+    `会议密码：${props.result.meeting_password}`,
+  ]
+  return lines.join('\n')
+}
+
+async function copyAll() {
+  const text = buildCopyAllText()
   try {
-    await navigator.clipboard.writeText(value)
-    copiedField.value = field
+    await navigator.clipboard.writeText(text)
+    copiedAll.value = true
     window.setTimeout(() => {
-      if (copiedField.value === field) copiedField.value = null
+      copiedAll.value = false
     }, 2000)
   } catch {
-    window.prompt('请手动复制', value)
+    window.prompt('请手动复制以下会议信息', text)
   }
 }
 </script>
@@ -24,31 +45,36 @@ async function copyText(field: string, value: string) {
 <template>
   <div class="result-card gn">
     <h4 class="result-title">国能会议已创建</h4>
-    <p v-if="result.subject" class="result-subtitle">{{ result.subject }}</p>
 
-    <div class="copy-row">
-      <div class="copy-main">
-        <span class="copy-label">会议链接</span>
-        <a :href="result.meeting_link" target="_blank" rel="noopener noreferrer" class="copy-value link">
+    <div class="invite-card">
+      <p class="invite-subject">{{ subject }}</p>
+
+      <div v-if="result.meeting_no" class="invite-row highlight">
+        <span class="invite-label">会议号</span>
+        <span class="invite-value meeting-no">{{ formatMeetingNo(result.meeting_no) }}</span>
+      </div>
+
+      <div class="invite-row">
+        <span class="invite-label">会议链接</span>
+        <a
+          :href="result.meeting_link"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="invite-value link"
+        >
           {{ result.meeting_link }}
         </a>
       </div>
-      <button type="button" class="copy-btn" @click="copyText('link', result.meeting_link)">
-        {{ copiedField === 'link' ? '已复制' : '复制' }}
-      </button>
-    </div>
 
-    <div class="copy-row">
-      <div class="copy-main">
-        <span class="copy-label">会议密码</span>
-        <span class="copy-value mono">{{ result.meeting_password }}</span>
+      <div class="invite-row">
+        <span class="invite-label">会议密码</span>
+        <span class="invite-value mono">{{ result.meeting_password }}</span>
       </div>
-      <button type="button" class="copy-btn" @click="copyText('password', result.meeting_password)">
-        {{ copiedField === 'password' ? '已复制' : '复制' }}
+
+      <button type="button" class="copy-all-btn" @click="copyAll">
+        {{ copiedAll ? '已复制全部信息' : '复制全部信息' }}
       </button>
     </div>
-
-    <p v-if="result.meeting_no" class="meta-hint">会议号：{{ result.meeting_no }}</p>
   </div>
 </template>
 
@@ -67,73 +93,91 @@ async function copyText(field: string, value: string) {
 }
 
 .result-title {
-  margin: 0 0 4px;
+  margin: 0 0 12px;
   font-size: 14px;
   font-weight: 600;
 }
 
-.result-subtitle {
-  margin: 0 0 12px;
-  font-size: 13px;
-  color: var(--text-secondary);
+.invite-card {
+  padding: 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
 }
 
-.copy-row {
+.invite-subject {
+  margin: 0 0 14px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.invite-row {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 4px;
   padding: 10px 0;
   border-top: 1px solid var(--border);
 }
 
-.copy-row:first-of-type {
-  border-top: none;
+.invite-row.highlight {
   padding-top: 0;
+  border-top: none;
+  padding-bottom: 12px;
 }
 
-.copy-main {
-  flex: 1;
-  min-width: 0;
-}
-
-.copy-label {
-  display: block;
+.invite-label {
   font-size: 11px;
   color: var(--text-muted);
-  margin-bottom: 4px;
 }
 
-.copy-value {
-  display: block;
+.invite-value {
   font-size: 13px;
+  color: var(--text);
   word-break: break-all;
+  line-height: 1.5;
+}
+
+.invite-value.meeting-no {
+  font-size: 22px;
+  font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.12em;
   color: var(--text);
 }
 
-.copy-value.link {
+.invite-value.link {
   color: var(--primary);
   text-decoration: none;
 }
 
-.copy-value.mono {
-  font-family: ui-monospace, monospace;
-  letter-spacing: 0.05em;
+.invite-value.link:hover {
+  text-decoration: underline;
 }
 
-.copy-btn {
-  flex-shrink: 0;
-  height: 32px;
-  padding: 0 12px;
-  border: 1px solid var(--border);
+.invite-value.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.copy-all-btn {
+  width: 100%;
+  height: 40px;
+  margin-top: 14px;
+  border: none;
   border-radius: var(--radius-sm);
-  background: var(--bg);
-  font-size: 12px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 500;
   cursor: pointer;
+  transition: opacity 0.15s;
 }
 
-.meta-hint {
-  margin: 8px 0 0;
-  font-size: 12px;
-  color: var(--text-muted);
+.copy-all-btn:hover {
+  opacity: 0.92;
 }
 </style>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import type { BookingSelectionMeta, FlightOption, HotelOption } from '@/types'
+import { computed, ref, watch } from 'vue'
+import type { BookingSelectionMeta, FlightOption, HotelOption, TrainOption } from '@/types'
 
 const props = defineProps<{
   selection: BookingSelectionMeta
@@ -8,21 +8,40 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  confirm: [payload: { flight_no?: string; hotel_name?: string }]
+  confirm: [payload: { flight_no?: string; train_no?: string; hotel_name?: string }]
 }>()
+
+const transportType = computed(() => props.selection.transport_type ?? 'flight')
+const isTrainMode = computed(() => transportType.value === 'train')
 
 const selectedFlightNo = ref<string | null>(
   props.selection.flights[0]?.flight_no ?? null,
 )
+const selectedTrainNo = ref<string | null>(
+  props.selection.trains?.[0]?.train_no ?? null,
+)
 const selectedHotelName = ref<string | null>(
-  props.selection.hotels[0]?.name ?? null,
+  props.selection.needs_flight ? null : (props.selection.hotels[0]?.name ?? null),
 )
 
 const isPending = computed(() => props.selection.status === 'pending')
 
+const hasTransportSelected = computed(() => (
+  isTrainMode.value ? Boolean(selectedTrainNo.value) : Boolean(selectedFlightNo.value)
+))
+
+const hotelSelectionEnabled = computed(() => {
+  if (!props.selection.needs_hotel) return false
+  if (!props.selection.needs_flight) return true
+  return hasTransportSelected.value
+})
+
 const canSubmit = computed(() => {
   if (!isPending.value || props.submitting) return false
-  if (props.selection.needs_flight && !selectedFlightNo.value) return false
+  if (props.selection.needs_flight) {
+    if (isTrainMode.value && !selectedTrainNo.value) return false
+    if (!isTrainMode.value && !selectedFlightNo.value) return false
+  }
   if (props.selection.needs_hotel && !selectedHotelName.value) return false
   return true
 })
@@ -32,18 +51,40 @@ function selectFlight(flight: FlightOption) {
   selectedFlightNo.value = flight.flight_no
 }
 
-function selectHotel(hotel: HotelOption) {
+function selectTrain(train: TrainOption) {
   if (!isPending.value) return
+  selectedTrainNo.value = train.train_no
+}
+
+function selectHotel(hotel: HotelOption) {
+  if (!isPending.value || !hotelSelectionEnabled.value) return
   selectedHotelName.value = hotel.name
 }
 
 function handleConfirm() {
   if (!canSubmit.value) return
   emit('confirm', {
-    flight_no: props.selection.needs_flight ? selectedFlightNo.value ?? undefined : undefined,
+    flight_no: !isTrainMode.value && props.selection.needs_flight
+      ? selectedFlightNo.value ?? undefined
+      : undefined,
+    train_no: isTrainMode.value && props.selection.needs_flight
+      ? selectedTrainNo.value ?? undefined
+      : undefined,
     hotel_name: props.selection.needs_hotel ? selectedHotelName.value ?? undefined : undefined,
   })
 }
+
+watch(selectedFlightNo, (flightNo) => {
+  if (props.selection.needs_flight && props.selection.needs_hotel && !flightNo && !isTrainMode.value) {
+    selectedHotelName.value = null
+  }
+})
+
+watch(selectedTrainNo, (trainNo) => {
+  if (props.selection.needs_flight && props.selection.needs_hotel && !trainNo && isTrainMode.value) {
+    selectedHotelName.value = null
+  }
+})
 
 function formatTime(value: string): string {
   const parts = value.split(' ')
@@ -55,10 +96,63 @@ function formatTime(value: string): string {
   <div class="booking-picker" :class="{ confirmed: !isPending }">
     <div class="picker-banner">
       <span class="picker-banner-icon" aria-hidden="true">☑</span>
-      <span>请直接点击勾选 · 航班与酒店各选一项</span>
+      <span v-if="selection.needs_flight && selection.needs_hotel">
+        请先选择{{ isTrainMode ? '车次' : '航班' }}，再选择酒店
+      </span>
+      <span v-else-if="selection.needs_flight">
+        请选择{{ isTrainMode ? '火车/高铁车次' : '航班' }}
+      </span>
+      <span v-else-if="selection.needs_hotel">请选择酒店</span>
+      <span v-else>请直接点击勾选 · 完成选择后确认预订</span>
     </div>
 
-    <section v-if="selection.needs_flight && selection.flights.length" class="picker-section">
+    <section
+      v-if="selection.needs_flight && isTrainMode && (selection.trains?.length ?? 0) > 0"
+      class="picker-section"
+    >
+      <h4 class="section-title">火车/高铁选项（{{ selection.trains?.length }} 个备选）</h4>
+      <div class="option-list">
+        <label
+          v-for="(train, idx) in selection.trains"
+          :key="train.train_no"
+          class="option-card"
+          :class="{ selected: selectedTrainNo === train.train_no, disabled: !isPending }"
+        >
+          <input
+            type="radio"
+            class="option-checkbox"
+            name="train-option"
+            :value="train.train_no"
+            :checked="selectedTrainNo === train.train_no"
+            :disabled="!isPending"
+            @change="selectTrain(train)"
+          />
+          <span class="checkbox-box" aria-hidden="true">
+            <span v-if="selectedTrainNo === train.train_no" class="check-mark">✓</span>
+          </span>
+          <div class="option-body" @click.prevent="selectTrain(train)">
+            <div class="option-head">
+              <span class="option-title">{{ train.train_no }}</span>
+              <span v-if="idx === 0" class="tag-recommend">推荐</span>
+              <span class="option-sub">{{ train.train_type }}</span>
+              <span class="option-price">{{ train.price }} 元</span>
+            </div>
+            <div class="option-detail">
+              {{ train.origin }} → {{ train.destination }}
+            </div>
+            <div class="option-detail muted">
+              {{ formatTime(train.departure_time) }} 出发 ·
+              {{ formatTime(train.arrival_time) }} 到达 · {{ train.seat_class }}
+            </div>
+          </div>
+        </label>
+      </div>
+    </section>
+
+    <section
+      v-if="selection.needs_flight && !isTrainMode && selection.flights.length"
+      class="picker-section"
+    >
       <h4 class="section-title">航班选项（{{ selection.flights.length }} 个备选）</h4>
       <div class="option-list">
         <label
@@ -98,14 +192,26 @@ function formatTime(value: string): string {
       </div>
     </section>
 
-    <section v-if="selection.needs_hotel && selection.hotels.length" class="picker-section">
-      <h4 class="section-title">酒店选项（{{ selection.hotels.length }} 个备选）</h4>
+    <section
+      v-if="selection.needs_hotel && selection.hotels.length"
+      class="picker-section"
+      :class="{ 'section-locked': !hotelSelectionEnabled }"
+    >
+      <h4 class="section-title">
+        酒店选项（{{ selection.hotels.length }} 个备选）
+        <span v-if="selection.needs_flight && !hotelSelectionEnabled" class="section-hint">
+          请先完成上方交通选择
+        </span>
+      </h4>
       <div class="option-list">
         <label
           v-for="(hotel, idx) in selection.hotels"
           :key="hotel.name"
           class="option-card"
-          :class="{ selected: selectedHotelName === hotel.name, disabled: !isPending }"
+          :class="{
+            selected: selectedHotelName === hotel.name,
+            disabled: !isPending || !hotelSelectionEnabled,
+          }"
         >
           <input
             type="radio"
@@ -113,7 +219,7 @@ function formatTime(value: string): string {
             name="hotel-option"
             :value="hotel.name"
             :checked="selectedHotelName === hotel.name"
-            :disabled="!isPending"
+            :disabled="!isPending || !hotelSelectionEnabled"
             @change="selectHotel(hotel)"
           />
           <span class="checkbox-box" aria-hidden="true">
@@ -195,6 +301,18 @@ function formatTime(value: string): string {
   font-size: 13px;
   font-weight: 600;
   color: var(--text);
+}
+
+.section-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.picker-section.section-locked .option-card:not(.selected) {
+  opacity: 0.55;
 }
 
 .option-list {

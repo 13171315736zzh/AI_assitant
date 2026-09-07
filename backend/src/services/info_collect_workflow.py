@@ -67,9 +67,25 @@ class InfoCollectWorkflowService:
         has_pending_plan_flag = has_pending_plan(pending_plan)
         card_payload = _card_payload(card_draft, "info_collect_plan_confirm")
 
+        from src.agent.workflow_plan import (
+            activated_plan_node,
+            get_workflow_plan_from_session,
+            is_parallel_workflow_plan,
+            should_service_handle_activation,
+        )
+
+        wf_plan = await get_workflow_plan_from_session(self.message_repo, session_id)
+        activated_info = activated_plan_node(user_content, wf_plan) == "info_collect"
+        if is_parallel_workflow_plan(wf_plan) and not should_service_handle_activation(
+            "info_collect", user_content, wf_plan
+        ):
+            return None
+
         should_run = is_info_collect_workflow_intent(ctx.combined_text)
         if not should_run and has_pending_plan_flag:
             should_run = is_info_collect_plan_update(user_content) or bool(card_payload)
+        if not should_run and activated_info:
+            should_run = True
         if not should_run:
             latest_extract = extract_structured_with_validation(
                 user_content or ctx.latest_user_text

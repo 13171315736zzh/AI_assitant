@@ -95,6 +95,7 @@ export async function submitOaApplication(
     task: Task
     session_id: string
     receipt_id?: string | null
+    assistant_message?: import('@/types').Message | null
   }>
 > {
   if (isMockMode('tasks')) {
@@ -158,6 +159,89 @@ export async function approveOaApplication(
     }
   }
   const { data } = await api.post(`/tasks/${taskId}/oa-approve`)
+  return data
+}
+
+export async function createGnMeeting(
+  taskId: string,
+): Promise<
+  ApiResponse<{
+    task: Task
+    session_id: string
+    receipt_id?: string | null
+    assistant_message?: import('@/types').Message | null
+  }>
+> {
+  if (isMockMode('tasks')) {
+    await delay(400)
+    const task = mockGetTask(taskId)
+    if (!task) {
+      return {
+        code: 404,
+        message: '任务不存在',
+        data: null as unknown as { task: Task; session_id: string },
+      }
+    }
+    const completedSteps = task.steps.map((step) => ({ ...step, status: 'completed' as const }))
+    return {
+      code: 200,
+      message: 'success',
+      data: {
+        task: {
+          ...task,
+          status: 'completed',
+          current_step: task.total_steps,
+          steps: completedSteps,
+        },
+        session_id: task.session_id,
+        receipt_id: `GN${Date.now()}`,
+      },
+    }
+  }
+  const { data } = await api.post(`/tasks/${taskId}/gn-meeting-create`)
+  return data
+}
+
+export async function submitEmailSent(
+  taskId: string,
+  payload: {
+    recipient?: string
+    subject?: string
+    message_id?: string
+  },
+): Promise<
+  ApiResponse<{
+    task: Task
+    session_id: string
+    assistant_message?: import('@/types').Message | null
+  }>
+> {
+  if (isMockMode('tasks')) {
+    await delay(300)
+    const task = mockGetTask(taskId)
+    if (!task) {
+      return {
+        code: 404,
+        message: '任务不存在',
+        data: null as unknown as { task: Task; session_id: string },
+      }
+    }
+    const completedSteps = task.steps.map((step) => ({ ...step, status: 'completed' as const }))
+    return {
+      code: 200,
+      message: 'success',
+      data: {
+        task: {
+          ...task,
+          status: 'completed',
+          current_step: task.total_steps,
+          steps: completedSteps,
+        },
+        session_id: task.session_id,
+      },
+    }
+  }
+  const { data } = await api.post(`/tasks/${taskId}/email-sent`, payload)
   return data
 }
 

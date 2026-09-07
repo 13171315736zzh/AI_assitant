@@ -8,6 +8,17 @@ from datetime import date, datetime, timedelta
 
 PROVIDER_NAME = "mock_travel_api_v1"
 
+_CITY_STATION: dict[str, str] = {
+    "北京": "北京南",
+    "上海": "上海虹桥",
+    "广州": "广州南",
+    "深圳": "深圳北",
+    "鄂尔多斯": "鄂尔多斯",
+    "南昌": "南昌西",
+    "呼和浩特": "呼和浩特东",
+    "海拉尔": "海拉尔",
+}
+
 _CITY_AIRPORT: dict[str, str] = {
     "北京": "首都/大兴",
     "上海": "浦东/虹桥",
@@ -28,6 +39,27 @@ _CITY_HOTEL_PREFIX: dict[str, str] = {
     "燕宝": "雁宝",
     "海拉尔": "海拉尔",
 }
+
+
+@dataclass
+class TrainOption:
+    train_no: str
+    train_type: str
+    origin: str
+    destination: str
+    departure_time: str
+    arrival_time: str
+    seat_class: str
+    price: int
+    provider: str = PROVIDER_NAME
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def to_public_dict(self) -> dict:
+        data = self.to_dict()
+        data.pop("provider", None)
+        return data
 
 
 @dataclass
@@ -74,6 +106,7 @@ class HotelOption:
 @dataclass
 class TravelBookingSnapshot:
     flights: list[FlightOption]
+    trains: list[TrainOption]
     hotels: list[HotelOption]
     provider: str = PROVIDER_NAME
     queried_at: str = ""
@@ -83,6 +116,7 @@ class TravelBookingSnapshot:
             "provider": self.provider,
             "queried_at": self.queried_at,
             "flights": [f.to_dict() for f in self.flights],
+            "trains": [t.to_dict() for t in self.trains],
             "hotels": [h.to_dict() for h in self.hotels],
         }
 
@@ -90,6 +124,7 @@ class TravelBookingSnapshot:
         return {
             "queried_at": self.queried_at,
             "flights": [f.to_public_dict() for f in self.flights],
+            "trains": [t.to_public_dict() for t in self.trains],
             "hotels": [h.to_public_dict() for h in self.hotels],
         }
 
@@ -100,18 +135,12 @@ def _seed_key(*parts: str) -> int:
 
 
 def _resolve_departure_date(hint: str | None) -> date:
+    from src.agent.travel_workflow import resolve_travel_date_hint
+
     today = date.today()
-    if hint and "明天" in hint:
-        return today + timedelta(days=1)
-    if hint and "后天" in hint:
-        return today + timedelta(days=2)
-    if hint and "周四" in hint:
-        weekday = today.weekday()
-        thursday = 3
-        delta = (thursday - weekday) % 7
-        if delta == 0:
-            delta = 7
-        return today + timedelta(days=delta)
+    parsed = resolve_travel_date_hint(hint)
+    if parsed is not None:
+        return parsed
     return today + timedelta(days=1)
 
 
@@ -176,6 +205,61 @@ async def search_flights(
     return flights[:3]
 
 
+def _seat_class_label(pref: str | None) -> tuple[str, int]:
+    pref = pref or "高铁"
+    if "一等" in pref or "商务" in pref:
+        return "一等座", 680
+    if "软席" in pref or "软座" in pref:
+        return "软席", 520
+    return "二等座", 360
+
+
+async def search_trains(
+    origin: str,
+    destination: str,
+    *,
+    departure_hint: str | None = None,
+    seat_pref: str | None = None,
+) -> list[TrainOption]:
+    """模拟调用第三方铁路查询 API。"""
+    dep_date = _resolve_departure_date(departure_hint)
+    seat_class, base_price = _seat_class_label(seat_pref)
+    seed = _seed_key(origin, destination, str(dep_date), seat_class, "train")
+    o_st = _CITY_STATION.get(origin, f"{origin}站")
+    d_st = _CITY_STATION.get(destination, f"{destination}站")
+
+    schedules = [
+        (8 + (seed % 2), 11 + (seed % 3)),
+        (10 + (seed % 2), 13 + (seed % 2)),
+        (14 + (seed % 2), 17 + (seed % 2)),
+    ]
+    train_nos = [
+        f"G{1000 + seed % 800}",
+        "G1234",
+        "D5678",
+    ]
+    train_types = ["高铁", "高铁", "动车"]
+    price_offsets = [0, 60, 120]
+
+    trains: list[TrainOption] = []
+    for train_no, train_type, (dep_h, arr_h), offset in zip(
+        train_nos, train_types, schedules, price_offsets, strict=False
+    ):
+        trains.append(
+            TrainOption(
+                train_no=train_no,
+                train_type=train_type,
+                origin=f"{o_st}（{origin}）",
+                destination=f"{d_st}（{destination}）",
+                departure_time=f"{dep_date.isoformat()} {dep_h:02d}:15",
+                arrival_time=f"{dep_date.isoformat()} {arr_h:02d}:40",
+                seat_class=seat_class,
+                price=base_price + offset + (seed % 80),
+            )
+        )
+    return trains[:3]
+
+
 async def search_hotels(
     city: str,
     nights: int,
@@ -216,9 +300,10 @@ async def search_hotels(
     return hotels[:3]
 
 
-async def query_travel_bookings(plan) -> TravelBookingSnapshot:
-    """根据 TravelPlan 一次性查询航班与酒店。"""
+async def query_travel_bookings(plan, *, transport_type: str | None = None) -> TravelBookingSnapshot:
+    """根据 TravelPlan 查询航班/火车与酒店；transport_type 为 flight 或 train。"""
     flights: list[FlightOption] = []
+    trains: list[TrainOption] = []
     hotels: list[HotelOption] = []
 
     if plan.needs_transport:
@@ -229,14 +314,24 @@ async def query_travel_bookings(plan) -> TravelBookingSnapshot:
         else:
             origin_city = origin
             origin_airport = plan.origin_airport
-        flights = await search_flights(
-            origin_city,
-            plan.destination or "目的地",
-            origin_airport=origin_airport,
-            departure_hint=plan.departure_hint,
-            cabin_pref=plan.transport_pref,
-            arrival_before=plan.arrival_deadline,
-        )
+        dest = plan.destination or "目的地"
+        mode = transport_type or "flight"
+        if mode == "train":
+            trains = await search_trains(
+                origin_city,
+                dest,
+                departure_hint=plan.departure_hint,
+                seat_pref=plan.transport_pref,
+            )
+        else:
+            flights = await search_flights(
+                origin_city,
+                dest,
+                origin_airport=origin_airport,
+                departure_hint=plan.departure_hint,
+                cabin_pref=plan.transport_pref,
+                arrival_before=plan.arrival_deadline,
+            )
 
     if plan.needs_hotel:
         nights = max((plan.trip_days or 1) - 1, 1)
@@ -251,6 +346,7 @@ async def query_travel_bookings(plan) -> TravelBookingSnapshot:
 
     return TravelBookingSnapshot(
         flights=flights,
+        trains=trains,
         hotels=hotels,
         queried_at=datetime.now().isoformat(timespec="seconds"),
     )

@@ -83,14 +83,36 @@ class LeaveWorkflowService:
         wp_fill_pending, _ = await get_pending_meta(
             self.message_repo, session_id, "workpackage_confirm"
         )
-        if "leave" in queue and (wp_pending or wp_fill_pending):
+        from src.agent.workflow_plan import (
+            activated_plan_node,
+            get_workflow_plan_from_session,
+            is_parallel_workflow_plan,
+            should_service_handle_activation,
+        )
+
+        wf_plan = await get_workflow_plan_from_session(self.message_repo, session_id)
+        parallel_plan = is_parallel_workflow_plan(wf_plan)
+        activated_leave = activated_plan_node(user_content, wf_plan) == "leave"
+        if parallel_plan and not should_service_handle_activation(
+            "leave", user_content, wf_plan
+        ):
+            return None
+
+        if (
+            "leave" in queue
+            and (wp_pending or wp_fill_pending)
+            and not parallel_plan
+        ):
             return None
 
         if not is_leave_workflow_intent(ctx.combined_text):
             card_payload = _leave_card_payload(card_draft)
             if not (
-                has_pending_plan_flag
-                and (is_leave_plan_update(user_content) or card_payload)
+                activated_leave
+                or (
+                    has_pending_plan_flag
+                    and (is_leave_plan_update(user_content) or card_payload)
+                )
             ):
                 return None
 

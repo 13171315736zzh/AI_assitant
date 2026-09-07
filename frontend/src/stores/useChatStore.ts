@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed, nextTick } from 'vue'
-import type { Message, Session } from '@/types'
+import type { EmailComposeMeta, Message, Session, Task } from '@/types'
 import {
   fetchSessions,
   fetchMessages,
@@ -24,6 +24,8 @@ import {
   findPendingWorkflowCard,
   type WorkflowCardDraft,
 } from '@/utils/workflowCardDraft'
+import { openMailCompose, saveMailPrefill } from '@/utils/emailMail'
+import type { OaDemoPayload } from '@/utils/oaDemo'
 import { useAuthStore } from './useAuthStore'
 
 const DEFAULT_WELCOME = DEFAULT_WELCOME_TEXT
@@ -168,17 +170,49 @@ export const useChatStore = defineStore('chat', () => {
     sending.value = false
   }
 
-  async function loadMessages(sessionId: string) {
+  async function loadMessages(sessionId: string, options?: { silent?: boolean }) {
     activeSessionId.value = sessionId
-    loading.value = true
+    if (!options?.silent) {
+      loading.value = true
+    }
     try {
       const res = await fetchMessages(sessionId)
       if (res.code === 200) {
         messages.value = res.data.items.filter((m) => m.message_type !== 'pending')
       }
     } finally {
-      loading.value = false
+      if (!options?.silent) {
+        loading.value = false
+      }
     }
+  }
+
+  function patchTaskMessageMetadata(taskId: string, task: Task) {
+    const completedCount = task.steps.filter((step) => step.status === 'completed').length
+    const total = task.total_steps || task.steps.length
+    const isCompleted = task.status === 'completed'
+
+    messages.value = messages.value.map((msg) => {
+      const meta = msg.metadata
+      if (!meta || meta.task_id !== taskId) return msg
+      return {
+        ...msg,
+        metadata: {
+          ...meta,
+          progress: isCompleted ? `${total}/${total}` : `${completedCount}/${total}`,
+          progress_percent: isCompleted ? 100 : meta.progress_percent,
+          status: isCompleted ? 'completed' : meta.status,
+          steps_desc: isCompleted && meta.steps_desc && !String(meta.steps_desc).includes('已完成')
+            ? `${String(meta.steps_desc).replace(/ · 进行中$/, '')} · 已完成`
+            : meta.steps_desc,
+        },
+      }
+    })
+  }
+
+  function appendAssistantMessageIfNew(message: Message) {
+    if (messages.value.some((item) => item.id === message.id)) return
+    messages.value = [...messages.value, message]
   }
 
   async function newSession() {
@@ -334,11 +368,13 @@ export const useChatStore = defineStore('chat', () => {
   async function confirmBooking(payload: {
     messageId: string
     flight_no?: string
+    train_no?: string
     hotel_name?: string
   }) {
     await _confirmWorkflow(payload.messageId, 'booking_selection', () =>
       confirmBookingSelection(activeSessionId.value!, {
         flight_no: payload.flight_no,
+        train_no: payload.train_no,
         hotel_name: payload.hotel_name,
       }),
     )
@@ -381,13 +417,69 @@ export const useChatStore = defineStore('chat', () => {
     )
   }
 
-  async function confirmTravelPlanAction(payload: { messageId: string }) {
+  async function confirmTravelPlanAction(payload: {
+    messageId: string
+    origin?: string
+    destination?: string
+    start_date?: string
+    end_date?: string
+    purpose?: string
+    transport_mode?: string
+    transport_other?: string
+    recipient?: string
+    cc?: string
+    subject?: string
+    body?: string
+    signature?: string
+  }) {
     const supplementary = takeSupplementaryInput()
-    await _confirmWorkflow(payload.messageId, 'travel_plan_confirm', () =>
+    const draft = workflowCardDrafts.value[`${payload.messageId}:travel_plan_confirm`]
+    const draftPayload = draft?.payload ?? {}
+    const travelFields = {
+      origin: payload.origin ?? (draftPayload.origin as string | undefined),
+      destination: payload.destination ?? (draftPayload.destination as string | undefined),
+      start_date: payload.start_date ?? (draftPayload.start_date as string | undefined),
+      end_date: payload.end_date ?? (draftPayload.end_date as string | undefined),
+      purpose: payload.purpose ?? (draftPayload.purpose as string | undefined),
+      transport_mode: payload.transport_mode ?? (draftPayload.transport_mode as string | undefined),
+      transport_other: payload.transport_other ?? (draftPayload.transport_other as string | undefined),
+    }
+    const emailFields = {
+      recipient: payload.recipient ?? (draftPayload.recipient as string | undefined) ?? '',
+      cc: payload.cc ?? (draftPayload.cc as string | undefined) ?? '',
+      subject: payload.subject ?? (draftPayload.subject as string | undefined) ?? '',
+      body: payload.body ?? (draftPayload.body as string | undefined) ?? '',
+      signature: payload.signature ?? (draftPayload.signature as string | undefined) ?? '',
+    }
+    const assistantMessage = await _confirmWorkflow(payload.messageId, 'travel_plan_confirm', async () =>
       confirmTravelPlan(activeSessionId.value!, {
         supplementary_content: supplementary || undefined,
+        ...travelFields,
+        ...emailFields,
       }),
     )
+    if (!assistantMessage) return
+
+    const confirmedCard = messages.value.find((m) => m.id === payload.messageId)
+    const isEmailOnly = Boolean(
+      (confirmedCard?.metadata?.travel_plan_confirm as { email_only?: boolean } | undefined)
+        ?.email_only,
+    )
+    const meta = assistantMessage.metadata ?? {}
+    const emailCompose = meta.email_compose as EmailComposeMeta | undefined
+    const taskId = (emailCompose?.task_id ?? meta.task_id) as string | undefined
+    if (taskId && isEmailOnly) {
+      saveMailPrefill(taskId, emailCompose ?? {
+        task_id: taskId,
+        session_id: activeSessionId.value ?? undefined,
+        recipient: emailFields.recipient,
+        cc: emailFields.cc,
+        subject: emailFields.subject,
+        body: emailFields.body,
+        signature: emailFields.signature,
+      })
+      openMailCompose(taskId)
+    }
   }
 
   async function confirmMeetingPlanAction(payload: {
@@ -485,15 +577,15 @@ export const useChatStore = defineStore('chat', () => {
         session_title?: string
       }
     }>,
-  ) {
-    if (!activeSessionId.value || workflowSubmitting.value) return
+  ): Promise<Message | null> {
+    if (!activeSessionId.value || workflowSubmitting.value) return null
     const sessionId = activeSessionId.value
     workflowSubmitting.value = true
     try {
       const res = await apiCall()
       if (res.code !== 200) {
         alert(res.message || '操作失败')
-        return
+        return null
       }
       const idx = messages.value.findIndex((m) => m.id === messageId)
       if (idx >= 0 && messages.value[idx].metadata?.[metaKey]) {
@@ -518,8 +610,10 @@ export const useChatStore = defineStore('chat', () => {
           session.title = res.data.session_title
         }
       }
+      return res.data.assistant_message
     } catch {
       alert('操作失败，请稍后重试')
+      return null
     } finally {
       workflowSubmitting.value = false
     }
@@ -532,14 +626,17 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  async function handleOaTaskUpdate(payload: {
-    sessionId: string
-    taskId: string
-    action: 'submitted' | 'completed'
-  }) {
-    if (activeSessionId.value === payload.sessionId) {
-      await loadMessages(payload.sessionId)
+  async function handleOaTaskUpdate(payload: OaDemoPayload) {
+    if (activeSessionId.value !== payload.sessionId) return
+
+    if (payload.assistantMessage) {
+      appendAssistantMessageIfNew(payload.assistantMessage)
     }
+    if (payload.task) {
+      patchTaskMessageMetadata(payload.taskId, payload.task)
+    }
+
+    await loadMessages(payload.sessionId, { silent: true })
   }
 
   return {
