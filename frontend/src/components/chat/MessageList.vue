@@ -44,7 +44,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   openTask: [taskId: string]
   openSource: [source: MessageSource]
-  confirmBooking: [payload: { messageId: string; flight_no?: string; train_no?: string; hotel_name?: string }]
+  confirmBooking: [payload: { messageId: string; flight_no?: string; train_no?: string; hotel_name?: string; drive?: boolean }]
   confirmRoom: [payload: { messageId: string; room: string }]
   confirmWorkpackage: [payload: { messageId: string; entries: import('@/types').TimesheetEntry[] }]
   confirmWorkpackagePlan: [payload: {
@@ -120,8 +120,10 @@ async function scrollToMessage(
 
   if (options?.highlightInteractive) {
     const zone = el.querySelector('.interactive-zone') as HTMLElement | null
-    if (zone) {
-      zone.scrollIntoView({ behavior, block: 'center' })
+    const planConfirm = el.querySelector('.plan-confirm') as HTMLElement | null
+    const focusEl = zone ?? planConfirm
+    if (focusEl) {
+      focusEl.scrollIntoView({ behavior, block: 'center' })
       focusedInteractiveId.value = messageId
       if (interactiveFocusTimer !== null) {
         window.clearTimeout(interactiveFocusTimer)
@@ -418,6 +420,16 @@ function handleNextNodeClick(msg: Message) {
   if (!nextNode?.node_id || props.quickActionsDisabled) return
   emit('quickStart', nodeActivationPrompt(nextNode.node_id, nextNode.label))
 }
+
+function showBookingSwitchToFlight(next: WorkflowNextNode | null | undefined): boolean {
+  if (!next || next.node_id !== 'booking') return false
+  return next.transport_type !== 'flight'
+}
+
+function handleSwitchToFlightBooking() {
+  if (props.quickActionsDisabled) return
+  emit('quickStart', '订机票')
+}
 </script>
 
 <template>
@@ -430,6 +442,7 @@ function handleNextNodeClick(msg: Message) {
         msg.role,
         {
           'welcome-row': msg.metadata?.is_welcome,
+          'wide-form-row': travelPlanConfirm(msg) || emailPlanConfirm(msg),
           focused: focusedMessageId === msg.id,
         },
       ]"
@@ -473,35 +486,56 @@ function handleNextNodeClick(msg: Message) {
             :result="roomBookingResult(msg)!"
           />
 
-          <button
+          <div
             v-if="workflowNextNode(msg)"
-            type="button"
             class="next-node-block"
-            :disabled="quickActionsDisabled"
-            @click="handleNextNodeClick(msg)"
           >
-            <div class="next-node-label">下一办理节点</div>
-            <div v-if="workflowNextNode(msg)?.label" class="next-node-title">
-              {{ workflowNextNode(msg)?.label }}
-            </div>
-            <div
-              v-if="(workflowNextNode(msg)?.missing_slots?.length ?? 0) > 0"
-              class="next-node-slots"
+            <button
+              type="button"
+              class="next-node-body"
+              :disabled="quickActionsDisabled"
+              @click="handleNextNodeClick(msg)"
             >
-              待补充：
-              <span
-                v-for="slot in workflowNextNode(msg)?.missing_slots"
-                :key="slot"
-                class="slot-chip"
+              <div class="next-node-label">下一办理节点</div>
+              <div v-if="workflowNextNode(msg)?.label" class="next-node-title">
+                {{ workflowNextNode(msg)?.label }}
+              </div>
+              <div
+                v-if="(workflowNextNode(msg)?.missing_slots?.length ?? 0) > 0"
+                class="next-node-slots"
               >
-                {{ slot }}
-              </span>
+                待补充：
+                <span
+                  v-for="slot in workflowNextNode(msg)?.missing_slots"
+                  :key="slot"
+                  class="slot-chip"
+                >
+                  {{ slot }}
+                </span>
+              </div>
+            </button>
+            <div
+              v-if="workflowNextNode(msg)?.node_id === 'booking' && workflowNextNode(msg)?.origin"
+              class="next-node-route"
+            >
+              <span class="route-label">出发地</span>
+              <span class="route-value">{{ workflowNextNode(msg)?.origin }}</span>
+              <button
+                v-if="showBookingSwitchToFlight(workflowNextNode(msg))"
+                type="button"
+                class="btn-switch-flight"
+                :disabled="quickActionsDisabled"
+                @click.stop="handleSwitchToFlightBooking"
+              >
+                改订机票
+              </button>
             </div>
-          </button>
+          </div>
         </div>
 
         <TravelPlanConfirmPanel
           v-if="travelPlanConfirm(msg)"
+          :class="{ 'interactive-focus': focusedInteractiveId === msg.id }"
           :confirm="travelPlanConfirm(msg)!"
           :submitting="workflowSubmitting"
           @update-draft="emit('updateCardDraft', {
@@ -515,8 +549,23 @@ function handleNextNodeClick(msg: Message) {
           })"
         />
 
+        <EmailPlanConfirmPanel
+          v-if="emailPlanConfirm(msg)"
+          :confirm="emailPlanConfirm(msg)!"
+          :submitting="workflowSubmitting"
+          @update-draft="emit('updateCardDraft', {
+            messageId: msg.id,
+            metaKey: 'travel_plan_confirm',
+            payload: $event,
+          })"
+          @confirm="emit('confirmTravelPlan', {
+            messageId: msg.id,
+            ...$event,
+          })"
+        />
+
         <div
-          v-if="hasInteractivePicker(msg) && !travelPlanConfirm(msg)"
+          v-if="hasInteractivePicker(msg) && !travelPlanConfirm(msg) && !emailPlanConfirm(msg)"
           class="interactive-zone"
           :class="{ 'interactive-focus': focusedInteractiveId === msg.id }"
         >
@@ -534,20 +583,6 @@ function handleNextNodeClick(msg: Message) {
           @confirm="(payload) => emit('confirmRoom', { messageId: msg.id, ...payload })"
         />
 
-        <EmailPlanConfirmPanel
-          v-if="emailPlanConfirm(msg)"
-          :confirm="emailPlanConfirm(msg)!"
-          :submitting="workflowSubmitting"
-          @update-draft="emit('updateCardDraft', {
-            messageId: msg.id,
-            metaKey: 'travel_plan_confirm',
-            payload: $event,
-          })"
-          @confirm="emit('confirmTravelPlan', {
-            messageId: msg.id,
-            ...$event,
-          })"
-        />
 
         <MeetingPlanConfirmPanel
           v-if="meetingPlanConfirm(msg)"
@@ -765,6 +800,14 @@ function handleNextNodeClick(msg: Message) {
   margin-top: 8vh;
 }
 
+.message-row.wide-form-row {
+  max-width: min(96%, 840px);
+}
+
+.message-row.wide-form-row .bubble {
+  width: 100%;
+}
+
 .message-row.focused .bubble {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 28%, transparent);
   animation: focusPulse 2.4s ease-out;
@@ -959,29 +1002,80 @@ function handleNextNodeClick(msg: Message) {
   display: block;
   width: 100%;
   margin-top: 12px;
-  padding: 12px 14px;
   border: 1px solid #bfdbfe;
   border-left: 4px solid #2563eb;
   border-radius: var(--radius-sm);
   background: #eff6ff;
+  overflow: hidden;
+}
+
+.next-node-body {
+  display: block;
+  width: 100%;
+  padding: 12px 14px;
+  border: none;
+  background: transparent;
   text-align: left;
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
 }
 
-.next-node-block:hover {
+.next-node-block:hover .next-node-body:not(:disabled) {
   background: #dbeafe;
-  border-color: #93c5fd;
-  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.12);
 }
 
-.next-node-block:focus-visible {
+.next-node-body:focus-visible {
   outline: 2px solid #2563eb;
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 
-.next-node-block:disabled {
+.next-node-body:disabled {
   opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.next-node-route {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 14px 12px;
+  border-top: 1px dashed #bfdbfe;
+}
+
+.next-node-route .route-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1d4ed8;
+}
+
+.next-node-route .route-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1e3a8a;
+}
+
+.next-node-route .btn-switch-flight {
+  margin-left: auto;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid #93c5fd;
+  border-radius: 999px;
+  background: #fff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.next-node-route .btn-switch-flight:hover:not(:disabled) {
+  background: #dbeafe;
+  border-color: #2563eb;
+}
+
+.next-node-route .btn-switch-flight:disabled {
+  opacity: 0.55;
   cursor: not-allowed;
 }
 
@@ -1008,6 +1102,12 @@ function handleNextNodeClick(msg: Message) {
 }
 
 .interactive-zone.interactive-focus {
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.25);
+  animation: interactive-pulse 1.2s ease-in-out 2;
+}
+
+:deep(.plan-confirm.interactive-focus) {
   border-radius: var(--radius-sm);
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.25);
   animation: interactive-pulse 1.2s ease-in-out 2;

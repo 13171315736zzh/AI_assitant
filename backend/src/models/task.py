@@ -38,6 +38,8 @@ class EmailSentRequest(BaseModel):
     recipient: str | None = None
     subject: str | None = None
     message_id: str | None = None
+    body: str | None = None
+    sent_at: str | None = None
 
 
 class TaskStatusPublic(BaseModel):

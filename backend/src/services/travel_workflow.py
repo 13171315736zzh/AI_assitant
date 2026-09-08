@@ -15,6 +15,7 @@ from src.agent.session_context import (
 )
 from src.agent.travel_workflow import (
     TravelPlan,
+    active_booking_leg_from_plan,
     apply_email_plan_draft,
     apply_memory_travel_hints,
     apply_travel_plan_draft,
@@ -32,7 +33,6 @@ from src.agent.travel_workflow import (
     build_travel_plan,
     build_travel_plan_confirm_content,
     build_travel_plan_confirm_metadata,
-    can_present_email_confirm,
     configure_email_only_plan,
     email_only_missing_slots,
     enrich_email_plan_from_memory,
@@ -45,24 +45,30 @@ from src.agent.travel_workflow import (
     is_travel_workflow_intent,
     is_travel_workflow_intent_with_memory,
     missing_hotel_booking_slots,
+    missing_slots,
     missing_transport_booking_slots,
+    needs_return_transport,
+    resolve_base_location,
     resolve_transport_booking_type,
     _extract_travel_purpose,
 )
 from src.agent.workflow_confirm import (
     get_pending_meta,
-    is_meta_confirmed,
+    get_pending_travel_plan_meta,
+    is_travel_plan_confirmed,
     mark_meta_confirmed,
     mark_meta_superseded,
 )
 from src.agent.workflow_plan import (
     activated_plan_node,
+    get_outbound_selection_from_plan,
     get_workflow_plan_from_session,
     is_parallel_workflow_plan,
     link_task_to_plan,
     match_node_from_text,
     match_plan_node_from_text,
     node_ids_for_travel_task,
+    set_booking_leg_progress,
     should_service_handle_activation,
     _node_by_id,
 )
@@ -143,18 +149,19 @@ class TravelWorkflowService:
         if not should_service_handle_activation("travel", user_content, wf_plan):
             return None
 
-        if not is_travel_workflow_intent_with_memory(ctx.combined_text, structured):
-            pending_plan_msg, pending_plan = await get_pending_meta(
-                self.message_repo, session_id, "travel_plan_confirm"
-            )
-            if not (has_pending_plan(pending_plan) and is_travel_plan_update(user_content)):
-                return None
-        else:
-            pending_plan_msg, pending_plan = await get_pending_meta(
-                self.message_repo, session_id, "travel_plan_confirm"
-            )
+        activated = activated_plan_node(user_content, wf_plan) if wf_plan else None
 
+        pending_plan_msg, pending_plan = await get_pending_travel_plan_meta(
+            self.message_repo, session_id
+        )
         has_pending_plan_flag = has_pending_plan(pending_plan)
+
+        if not is_travel_workflow_intent_with_memory(ctx.combined_text, structured):
+            travel_node_active = activated in ("travel", "booking", "hotel")
+            if not (has_pending_plan_flag and is_travel_plan_update(user_content)):
+                if not travel_node_active:
+                    return None
+
         parallel_plan = is_parallel_workflow_plan(wf_plan)
         if parallel_plan and not has_pending_plan_flag:
             travel_node = activated_plan_node(user_content, wf_plan)
@@ -180,8 +187,15 @@ class TravelWorkflowService:
         )
         if pending_msg and pending_sel:
             transport_type = pending_sel.get("transport_type")
+            leg = pending_sel.get("leg") or "outbound"
+            leg_label = "返程" if leg == "return" else "去程"
             if pending_sel.get("booking_kind") == "transport":
-                label = "航班" if transport_type == "flight" else "火车/高铁"
+                if transport_type == "drive":
+                    label = f"{leg_label}自驾"
+                elif transport_type == "flight":
+                    label = f"{leg_label}航班"
+                else:
+                    label = f"{leg_label}火车/高铁"
             else:
                 label = "酒店"
             return (
@@ -190,10 +204,11 @@ class TravelWorkflowService:
                 {"interactive": True, "booking_selection": pending_sel},
             )
 
+        plan_confirmed = await is_travel_plan_confirmed(
+            self.message_repo, session_id
+        )
+
         if booking_kind:
-            plan_confirmed = await is_meta_confirmed(
-                self.message_repo, session_id, "travel_plan_confirm"
-            )
             return await self._try_booking_selection_flow(
                 user_id,
                 session_id,
@@ -203,7 +218,25 @@ class TravelWorkflowService:
                 user_content=user_content,
                 plan_confirmed=plan_confirmed,
                 wf_plan=wf_plan,
+                structured=structured,
             )
+
+        async def return_travel_confirm_card(*, updated: bool) -> tuple[str, str, dict]:
+            if pending_plan_msg and has_pending_plan_flag:
+                mark_meta_superseded(pending_plan_msg, "travel_plan_confirm")
+                await self.db.flush()
+            content = build_travel_plan_confirm_content(plan, updated=updated)
+            metadata = build_travel_plan_confirm_metadata(plan)
+            return content, "text", metadata
+
+        # 显式激活差旅节点（如点击「下一办理节点 → 差旅单」）：始终展示可编辑确认卡
+        if activated == "travel":
+            return await return_travel_confirm_card(
+                updated=plan_confirmed or has_pending_plan_flag
+            )
+
+        if not plan_confirmed:
+            return await return_travel_confirm_card(updated=has_pending_plan_flag)
 
         if not is_ready_to_execute(plan):
             return None
@@ -211,27 +244,10 @@ class TravelWorkflowService:
         if not plan.trip_days and (plan.departure_hint or plan.return_hint):
             plan.trip_days = max(plan.trip_days or 1, 1)
 
-        if pending_plan_msg and has_pending_plan_flag:
-            mark_meta_superseded(pending_plan_msg, "travel_plan_confirm")
-            await self.db.flush()
-
-        plan_confirmed = await is_meta_confirmed(
-            self.message_repo, session_id, "travel_plan_confirm"
-        )
-
-        if not plan_confirmed:
-            content = build_travel_plan_confirm_content(
-                plan, updated=has_pending_plan_flag
-            )
-            metadata = build_travel_plan_confirm_metadata(plan)
-            return content, "text", metadata
-
         if await self._travel_task_created(session_id):
             if not is_travel_plan_update(user_content):
                 return None
-            content = build_travel_plan_confirm_content(plan, updated=True)
-            metadata = build_travel_plan_confirm_metadata(plan)
-            return content, "text", metadata
+            return await return_travel_confirm_card(updated=True)
 
         return await self._create_task_reply(
             user_id, session_id, plan, user, booking={"flights": [], "hotels": []}
@@ -269,7 +285,7 @@ class TravelWorkflowService:
             return None
 
         ctx = await load_session_context(self.message_repo, session_id)
-        structured, memory_items, display_name = await self._load_email_memory_context(user_id)
+        structured, memory_items, display_name, _sender_email = await self._load_email_memory_context(user_id)
         user_messages = extend_user_messages(ctx.user_messages, supplementary_content)
         plan = build_travel_plan(
             user_messages,
@@ -317,7 +333,17 @@ class TravelWorkflowService:
         else:
             plan = apply_travel_plan_draft(plan, merged_draft)
             if not is_ready_to_execute(plan):
-                return None
+                mark_meta_superseded(pending_msg, "travel_plan_confirm")
+                await self.db.flush()
+                missing = missing_slots(plan)
+                hint = "、".join(missing) if missing else "必填项"
+                content = "\n".join([
+                    build_travel_plan_confirm_content(plan, updated=True),
+                    "",
+                    f"请补充：**{hint}**",
+                ])
+                metadata = build_travel_plan_confirm_metadata(plan)
+                return content, "text", metadata
 
         if not plan.trip_days and (plan.needs_transport or plan.needs_hotel):
             plan.trip_days = 1
@@ -336,6 +362,7 @@ class TravelWorkflowService:
         flight_no: str | None = None,
         train_no: str | None = None,
         hotel_name: str | None = None,
+        drive: bool = False,
         staff_level: str | None = None,
     ) -> tuple[str, str, dict] | None:
         user = await self.user_repo.get_by_id(user_id)
@@ -364,22 +391,46 @@ class TravelWorkflowService:
         trains = pending_sel.get("trains") or []
         hotels = pending_sel.get("hotels") or []
         transport_type = pending_sel.get("transport_type", "flight")
+        leg = pending_sel.get("leg") or "outbound"
+        needs_return = bool(pending_sel.get("needs_return"))
+        route_origin = pending_sel.get("origin") or plan.origin or ""
+        route_dest = pending_sel.get("destination") or plan.destination or ""
 
         selected_transport = None
         needs_transport = pending_sel.get("needs_flight", plan.needs_transport)
         if needs_transport and booking_kind == "transport":
-            if transport_type == "train":
-                if not train_no:
-                    return None
+            if drive:
+                dep_date = str(pending_sel.get("departure_date") or plan.departure_hint or "—")
+                selected_transport = {
+                    "transport_mode": "自驾",
+                    "origin": route_origin,
+                    "destination": route_dest,
+                    "departure_date": dep_date,
+                    "departure_time": dep_date,
+                    "flight_no": "—",
+                    "train_no": "—",
+                    "price": 0,
+                }
+            elif train_no:
                 selected_transport = next(
                     (t for t in trains if t.get("train_no") == train_no), None
                 )
-            else:
-                if not flight_no:
-                    return None
+            elif flight_no:
                 selected_transport = next(
                     (f for f in flights if f.get("flight_no") == flight_no), None
                 )
+            elif transport_type == "drive":
+                dep_date = str(pending_sel.get("departure_date") or plan.departure_hint or "—")
+                selected_transport = {
+                    "transport_mode": "自驾",
+                    "origin": route_origin,
+                    "destination": route_dest,
+                    "departure_date": dep_date,
+                    "departure_time": dep_date,
+                    "flight_no": "—",
+                    "train_no": "—",
+                    "price": 0,
+                }
             if selected_transport is None:
                 return None
 
@@ -394,12 +445,51 @@ class TravelWorkflowService:
             if selected_hotel is None:
                 return None
 
+        await self._mark_selection_confirmed(pending_msg)
+
+        if (
+            booking_kind == "transport"
+            and needs_return
+            and leg == "outbound"
+            and selected_transport
+        ):
+            wf_plan = await set_booking_leg_progress(
+                self.message_repo,
+                session_id,
+                leg="outbound",
+                status="completed",
+                needs_return=True,
+                outbound_selection=selected_transport,
+            )
+            return await self._show_return_booking_selection(
+                session_id,
+                plan,
+                structured,
+                wf_plan,
+            )
+
+        transport_legs: list[dict] = []
+        if selected_transport and booking_kind == "transport":
+            transport_legs.append({"leg": leg, "selected": selected_transport})
+            if needs_return and leg == "return":
+                outbound = get_outbound_selection_from_plan(
+                    await get_workflow_plan_from_session(self.message_repo, session_id)
+                )
+                if outbound:
+                    transport_legs.insert(0, {"leg": "outbound", "selected": outbound})
+                await set_booking_leg_progress(
+                    self.message_repo,
+                    session_id,
+                    leg="return",
+                    status="completed",
+                    needs_return=True,
+                )
+
         booking = {
+            "transport_legs": transport_legs,
             "flights": [selected_transport] if selected_transport else [],
             "hotels": [selected_hotel] if selected_hotel else [],
         }
-
-        await self._mark_selection_confirmed(pending_msg)
 
         return await self._create_task_reply(
             user_id, session_id, plan, user, booking=booking
@@ -415,13 +505,19 @@ class TravelWorkflowService:
     ) -> tuple[str, str, dict]:
         flights = booking.get("flights") or []
         hotels = booking.get("hotels") or []
-        if (flights or hotels) and not plan.email_only:
+        transport_legs = booking.get("transport_legs") or []
+        if (flights or hotels or transport_legs) and not plan.email_only:
             return await self._create_booking_tasks_reply(
                 user_id, session_id, plan, user, booking
             )
 
         task_id = _new_task_id()
-        steps = self._build_steps(plan, user.display_name)
+        sender_name = user.display_name
+        sender_email = ""
+        if plan.email_only:
+            _, _, sender_name, sender_email = await self._load_email_memory_context(user_id)
+
+        steps = self._build_steps(plan, sender_name)
         self._apply_booking_results(steps, booking)
         completed = sum(1 for s in steps if s["status"] == "completed")
         task = TaskRecord(
@@ -447,7 +543,7 @@ class TravelWorkflowService:
                     "email",
                     session_id,
                     task_id,
-                    self._email_fields(plan, user.display_name),
+                    self._email_fields(plan, sender_name),
                 )
                 email_form_id = email_form.form_id if email_form else None
                 for step in steps:
@@ -495,7 +591,14 @@ class TravelWorkflowService:
             else build_execution_summary(plan, user.display_name, task_id, booking=booking)
         )
         metadata = (
-            build_email_task_metadata(plan, task_id, email_form_id, session_id)
+            build_email_task_metadata(
+                plan,
+                task_id,
+                email_form_id,
+                session_id,
+                sender_name=sender_name,
+                sender_email=sender_email,
+            )
             if plan.email_only
             else build_task_metadata(plan, task_id)
         )
@@ -510,17 +613,26 @@ class TravelWorkflowService:
         booking: dict,
     ) -> tuple[str, str, dict]:
         related_metas: list[dict] = []
+        transport_legs = booking.get("transport_legs") or []
         flights = booking.get("flights") or []
         hotels = booking.get("hotels") or []
 
-        if flights:
+        if not transport_legs and flights:
+            transport_legs = [{"leg": "outbound", "selected": flights[0]}]
+
+        for leg_info in transport_legs:
+            selected = leg_info.get("selected")
+            leg = str(leg_info.get("leg") or "outbound")
+            if not isinstance(selected, dict):
+                continue
             meta = await self._create_single_booking_task(
                 user_id,
                 session_id,
                 plan,
                 user,
                 kind="transport",
-                selected=flights[0],
+                selected=selected,
+                leg=leg,
             )
             related_metas.append(meta)
 
@@ -564,6 +676,7 @@ class TravelWorkflowService:
         *,
         kind: str,
         selected: dict,
+        leg: str = "outbound",
     ) -> dict:
         task_id = _new_task_id()
         structured = await SettingsService(
@@ -576,7 +689,9 @@ class TravelWorkflowService:
             form_type = "transport_book"
             fields = self._transport_book_fields(plan, user, structured, selected)
             node_id = "booking"
-            metadata_builder = build_transport_task_metadata
+            metadata_builder = lambda p, tid, sel: build_transport_task_metadata(
+                p, tid, sel, leg=leg
+            )
         else:
             tool = "hotel_book"
             action = "酒店预订"
@@ -648,7 +763,9 @@ class TravelWorkflowService:
         structured: dict,
         transport: dict,
     ) -> dict[str, str]:
-        name = str(structured.get("display_name") or user.display_name or "").strip()
+        from src.agent.user_memory import resolve_id_number_for_form
+
+        name = str(structured.get("display_name") or "").strip()
         employee_id = str(structured.get("employee_id") or user.employee_id or "").strip()
         phone = str(structured.get("phone") or structured.get("mobile") or "").strip()
         dep_time = str(transport.get("departure_time") or "")
@@ -658,15 +775,27 @@ class TravelWorkflowService:
         ticket_no = str(
             transport.get("train_no") or transport.get("flight_no") or "—"
         )
+        mode_raw = str(transport.get("transport_mode") or "").strip()
+        if mode_raw == "自驾" or "自驾" in mode_raw:
+            transport_mode = "自驾"
+        elif transport.get("train_no"):
+            transport_mode = "高铁"
+        elif transport.get("flight_no") and transport.get("flight_no") != "—":
+            transport_mode = "机票"
+        elif "自驾" in str(plan.transport_pref or ""):
+            transport_mode = "自驾"
+        else:
+            transport_mode = "高铁"
         return {
-            "passenger_name": name,
-            "id_number": employee_id if len(employee_id) >= 15 else "110101199001011234",
+            "passenger_name": name or "—",
+            "id_number": resolve_id_number_for_form(structured),
             "phone": phone or "13800138000",
             "departure_date": dep_date,
             "departure_time": dep_clock or "—",
             "flight_no": ticket_no,
             "origin": str(transport.get("origin") or plan.origin or "北京"),
             "destination": str(transport.get("destination") or plan.destination or "—"),
+            "transport_mode": transport_mode,
             "amount": str(amount) if amount is not None else "—",
         }
 
@@ -677,13 +806,15 @@ class TravelWorkflowService:
         structured: dict,
         hotel: dict,
     ) -> dict[str, str]:
-        name = str(structured.get("display_name") or user.display_name or "").strip()
+        from src.agent.user_memory import resolve_id_number_for_form
+
+        name = str(structured.get("display_name") or "").strip()
         employee_id = str(structured.get("employee_id") or user.employee_id or "").strip()
         phone = str(structured.get("phone") or structured.get("mobile") or "").strip()
         amount = hotel.get("price_per_night")
         return {
-            "guest_name": name,
-            "id_number": employee_id if len(employee_id) >= 15 else "110101199001011234",
+            "guest_name": name or "—",
+            "id_number": resolve_id_number_for_form(structured),
             "phone": phone or "13800138000",
             "check_in": str(hotel.get("check_in") or "—"),
             "check_out": str(hotel.get("check_out") or "—"),
@@ -708,20 +839,11 @@ class TravelWorkflowService:
                 return True
             if wf_plan.get("active_node_id") == "email":
                 return True
-
-        if is_travel_workflow_intent(user_content):
-            return False
-        if is_travel_workflow_intent_with_memory(combined_text, structured):
-            return False
-
-        if wf_plan:
             active_id = wf_plan.get("active_node_id")
-            if active_id in ("travel", "booking", "hotel"):
+            if active_id in ("travel", "booking", "hotel") and plan_node not in (None, "email"):
                 return False
-            plan_node = match_plan_node_from_text(user_content, wf_plan)
-            if plan_node in ("travel", "booking", "hotel"):
-                return False
-            return False
+
+        # 当前消息明确写邮件时，不因同句或会话含出差表述而跳过邮件确认卡
         return True
 
     async def _try_email_only(
@@ -739,7 +861,7 @@ class TravelWorkflowService:
         if user is None:
             return None
 
-        structured, memory_items, display_name = await self._load_email_memory_context(user_id)
+        structured, memory_items, display_name, _sender_email = await self._load_email_memory_context(user_id)
 
         pending_plan_msg, pending_plan = await get_pending_meta(
             self.message_repo, session_id, "travel_plan_confirm"
@@ -766,16 +888,6 @@ class TravelWorkflowService:
             mark_meta_superseded(pending_plan_msg, "travel_plan_confirm")
             await self.db.flush()
 
-        if not can_present_email_confirm(plan):
-            missing = email_only_missing_slots(plan)
-            return (
-                "请补充邮件信息：**"
-                + "、".join(missing)
-                + "**。例如：「发邮件给张经理，主题出差安排确认」。",
-                "text",
-                None,
-            )
-
         content = build_email_plan_confirm_content(
             plan,
             updated=has_pending_plan_flag,
@@ -798,18 +910,21 @@ class TravelWorkflowService:
         payload = card_draft.get("payload")
         return dict(payload) if isinstance(payload, dict) else {}
 
-    async def _load_email_memory_context(self, user_id: int) -> tuple[dict, list[dict], str]:
+    async def _load_email_memory_context(self, user_id: int) -> tuple[dict, list[dict], str, str]:
+        from src.agent.user_memory import resolve_user_email
+
         user = await self.user_repo.get_by_id(user_id)
         if user is None:
-            return {}, [], ""
+            return {}, [], "", ""
         settings_svc = SettingsService(
             UserSettingsRepository(self.db), self.user_repo
         )
         memory = await settings_svc.get_memory(user_id)
         structured = memory.structured.model_dump()
         memory_items = [item.model_dump() for item in memory.memory_items]
-        display_name = str(structured.get("display_name") or user.display_name or "").strip()
-        return structured, memory_items, display_name
+        display_name = str(structured.get("display_name") or "").strip()
+        sender_email = resolve_user_email(structured, memory_items)
+        return structured, memory_items, display_name, sender_email
 
     async def _apply_project_mapping(self, plan: TravelPlan, text: str) -> None:
         resolved = await ProjectMappingService(self.db).resolve_from_text(text)
@@ -868,6 +983,42 @@ class TravelWorkflowService:
                 return True
         return False
 
+    async def _show_return_booking_selection(
+        self,
+        session_id: str,
+        plan: TravelPlan,
+        structured: dict | None,
+        wf_plan: dict | None,
+    ) -> tuple[str, str, dict]:
+        base_location = resolve_base_location(plan, structured)
+        booking_snapshot = await query_travel_bookings(
+            plan,
+            leg="return",
+            base_location=base_location,
+        )
+        booking = booking_snapshot.to_public_dict()
+        transport_type = resolve_transport_booking_type("", plan)
+        content = build_booking_selection_content(
+            plan,
+            booking_kind="transport",
+            transport_type=transport_type,
+            leg="return",
+            base_location=base_location,
+            needs_return=True,
+        )
+        metadata = build_booking_selection_metadata(
+            plan,
+            booking,
+            booking_kind="transport",
+            transport_type=transport_type,
+            leg="return",
+            base_location=base_location,
+            needs_return=True,
+        )
+        if wf_plan:
+            metadata["workflow_plan"] = wf_plan
+        return content, "text", metadata
+
     async def _try_booking_selection_flow(
         self,
         user_id: int,
@@ -879,14 +1030,13 @@ class TravelWorkflowService:
         user_content: str = "",
         plan_confirmed: bool,
         wf_plan: dict | None,
+        structured: dict | None = None,
     ) -> tuple[str, str, dict] | None:
         has_travel_node = bool(wf_plan and _node_by_id(wf_plan, "travel"))
         if has_travel_node and not plan_confirmed:
-            if is_ready_to_execute(plan):
-                content = build_travel_plan_confirm_content(plan)
-                metadata = build_travel_plan_confirm_metadata(plan)
-                return content, "text", metadata
-            return None
+            content = build_travel_plan_confirm_content(plan)
+            metadata = build_travel_plan_confirm_metadata(plan)
+            return content, "text", metadata
 
         if booking_kind == "transport":
             plan.needs_transport = True
@@ -911,19 +1061,31 @@ class TravelWorkflowService:
         if not plan.trip_days and plan.departure_hint:
             plan.trip_days = 1
 
+        base_location = resolve_base_location(plan, structured)
+        needs_return = (
+            booking_kind == "transport" and needs_return_transport(plan)
+        )
+        leg = active_booking_leg_from_plan(wf_plan) if needs_return else "outbound"
+
         transport_type = (
             resolve_transport_booking_type(user_content, plan)
             if booking_kind == "transport"
             else None
         )
         booking_snapshot = await query_travel_bookings(
-            plan, transport_type=transport_type
+            plan,
+            transport_type=None,
+            leg=leg,
+            base_location=base_location,
         )
         booking = booking_snapshot.to_public_dict()
         content = build_booking_selection_content(
             plan,
             booking_kind=booking_kind,
             transport_type=transport_type,
+            leg=leg,
+            base_location=base_location,
+            needs_return=needs_return,
         )
         metadata = build_booking_selection_metadata(
             plan,
@@ -931,7 +1093,12 @@ class TravelWorkflowService:
             booking_kind=booking_kind,
             transport_type=transport_type,
             user_text=user_content,
+            leg=leg,
+            base_location=base_location,
+            needs_return=needs_return,
         )
+        if wf_plan:
+            metadata["workflow_plan"] = wf_plan
         return content, "text", metadata
 
     async def _get_pending_booking_selection(

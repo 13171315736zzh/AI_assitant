@@ -49,7 +49,7 @@ watch(
     transportMode.value = value.transport_mode ?? '飞机'
     transportOther.value = value.transport_other ?? ''
   },
-  { deep: true },
+  { deep: true, immediate: true },
 )
 
 const isPending = computed(() => props.confirm.status === 'pending')
@@ -90,57 +90,71 @@ function handleConfirm() {
   <div class="plan-confirm" :class="{ confirmed: !isPending }">
     <h4 class="section-title">{{ confirm.title }}</h4>
 
-    <dl v-if="!isPending" class="info-list">
+    <dl v-if="isPending" class="info-list">
+      <div class="info-row">
+        <dt>出发地</dt>
+        <dd>
+          <input v-model="origin" type="text" class="field-control field-input" placeholder="如：北京" :disabled="submitting" />
+        </dd>
+      </div>
+      <div class="info-row">
+        <dt>目的地</dt>
+        <dd>
+          <input v-model="destination" type="text" class="field-control field-input" placeholder="如：鄂尔多斯" :disabled="submitting" />
+        </dd>
+      </div>
+      <div class="info-row">
+        <dt>开始时间</dt>
+        <dd>
+          <input v-model="startDate" type="date" class="field-control field-input" :disabled="submitting" />
+        </dd>
+      </div>
+      <div class="info-row">
+        <dt>结束时间</dt>
+        <dd>
+          <input v-model="endDate" type="date" class="field-control field-input" :disabled="submitting" />
+        </dd>
+      </div>
+      <div class="info-row info-row-top info-row-purpose">
+        <dt>出差目的</dt>
+        <dd>
+          <textarea
+            v-model="purpose"
+            class="field-control field-textarea"
+            rows="3"
+            placeholder="如：项目现场维护"
+            :disabled="submitting"
+          />
+        </dd>
+      </div>
+      <div class="info-row">
+        <dt>交通方式</dt>
+        <dd>
+          <select v-model="transportMode" class="field-control field-select" :disabled="submitting">
+            <option v-for="mode in TRANSPORT_MODES" :key="mode" :value="mode">{{ mode }}</option>
+          </select>
+        </dd>
+      </div>
+      <div v-if="showTransportOther" class="info-row">
+        <dt>其他说明</dt>
+        <dd>
+          <input
+            v-model="transportOther"
+            type="text"
+            class="field-control field-input"
+            placeholder="请填写具体交通方式"
+            :disabled="submitting"
+          />
+        </dd>
+      </div>
+    </dl>
+
+    <dl v-else class="info-list">
       <div v-for="(item, i) in confirm.items" :key="i" class="info-row">
         <dt>{{ item.label }}</dt>
         <dd>{{ item.value }}</dd>
       </div>
     </dl>
-
-    <div v-if="isPending" class="fields">
-      <div class="field-row">
-        <span class="field-key">出发地</span>
-        <input v-model="origin" type="text" class="field-input" placeholder="如：北京" :disabled="submitting" />
-      </div>
-      <div class="field-row">
-        <span class="field-key">目的地</span>
-        <input v-model="destination" type="text" class="field-input" placeholder="如：鄂尔多斯" :disabled="submitting" />
-      </div>
-      <div class="field-row">
-        <span class="field-key">开始时间</span>
-        <input v-model="startDate" type="date" class="field-input" :disabled="submitting" />
-      </div>
-      <div class="field-row">
-        <span class="field-key">结束时间</span>
-        <input v-model="endDate" type="date" class="field-input" :disabled="submitting" />
-      </div>
-      <div class="field-row field-row-top">
-        <span class="field-key">出差目的</span>
-        <textarea
-          v-model="purpose"
-          class="reason-input"
-          rows="2"
-          placeholder="如：项目现场维护（未能识别时可留空）"
-          :disabled="submitting"
-        />
-      </div>
-      <div class="field-row">
-        <span class="field-key">交通方式</span>
-        <select v-model="transportMode" class="field-input field-select" :disabled="submitting">
-          <option v-for="mode in TRANSPORT_MODES" :key="mode" :value="mode">{{ mode }}</option>
-        </select>
-      </div>
-      <div v-if="showTransportOther" class="field-row">
-        <span class="field-key">其他说明</span>
-        <input
-          v-model="transportOther"
-          type="text"
-          class="field-input"
-          placeholder="请填写具体交通方式"
-          :disabled="submitting"
-        />
-      </div>
-    </div>
 
     <div v-if="isPending" class="confirm-footer">
       <button
@@ -160,9 +174,11 @@ function handleConfirm() {
 .plan-confirm {
   margin-top: 12px;
   padding: 12px;
-  background: var(--bg);
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
+  width: 100%;
+  min-width: 0;
 }
 
 .section-title {
@@ -176,17 +192,28 @@ function handleConfirm() {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  width: 100%;
 }
 
 .info-row {
   display: grid;
   grid-template-columns: 88px 1fr;
-  gap: 8px;
+  gap: 10px;
   padding: 8px 10px;
-  background: var(--surface);
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   font-size: 13px;
+  width: 100%;
+  max-width: 100%;
+}
+
+.info-row-top {
+  align-items: start;
+}
+
+.info-row-top dt {
+  padding-top: 8px;
 }
 
 .info-row dt {
@@ -195,71 +222,70 @@ function handleConfirm() {
 
 .info-row dd {
   margin: 0;
+  min-width: 0;
+  width: 100%;
+}
+
+/* 统一输入/选择框：浅色底、同宽 */
+.field-control {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  display: block;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #ffffff;
   color: var(--text);
-  word-break: break-word;
-}
-
-.fields {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-
-.field-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.field-row-top {
-  align-items: flex-start;
-}
-
-.field-key {
-  width: 88px;
-  flex-shrink: 0;
-  padding-top: 8px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.field-row-top .field-key {
-  padding-top: 10px;
-}
-
-.required {
-  color: #dc2626;
-  margin-left: 2px;
+  font-size: 13px;
+  font-family: inherit;
 }
 
 .field-input {
-  flex: 1;
-  min-width: 0;
   height: 36px;
   padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-size: 13px;
-  background: var(--surface);
-  color: var(--text);
+}
+
+.field-input[type='date'] {
+  min-width: 0;
 }
 
 .field-select {
+  height: 36px;
+  padding: 0 10px;
   cursor: pointer;
+  appearance: none;
+  background-color: #ffffff;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-secondary) 50%),
+    linear-gradient(135deg, var(--text-secondary) 50%, transparent 50%);
+  background-position: calc(100% - 16px) calc(50% + 2px), calc(100% - 11px) calc(50% + 2px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 28px;
 }
 
-.reason-input {
-  flex: 1;
-  min-width: 0;
+.field-textarea {
+  min-height: 72px;
   padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-size: 13px;
-  line-height: 1.5;
   resize: vertical;
-  background: var(--surface);
-  color: var(--text);
+  line-height: 1.5;
+}
+
+.info-row-purpose dd {
+  width: 100%;
+}
+
+.field-control:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+[data-resolved-theme='dark'] .plan-confirm .field-control {
+  background-color: #3a4049;
+}
+
+[data-resolved-theme='dark'] .plan-confirm .field-select {
+  background-color: #3a4049;
 }
 
 .confirm-footer {

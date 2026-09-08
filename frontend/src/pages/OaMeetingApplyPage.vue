@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import { useMemoryProfile } from '@/composables/useMemoryProfile'
 import { useAuthStore } from '@/stores/useAuthStore'
 import { approveOaApplication, createGnMeeting, fetchTask, submitOaApplication } from '@/services/taskService'
 import { fetchForm } from '@/services/formService'
@@ -28,6 +29,10 @@ import {
 
 const route = useRoute()
 const auth = useAuthStore()
+const memory = useMemoryProfile()
+const applicantName = computed(() =>
+  memory.resolveDisplayName(auth.user?.display_name, '员工'),
+)
 
 const loading = ref(true)
 const error = ref<string | null>(null)
@@ -68,7 +73,7 @@ const applicationNo = computed(() => {
 })
 
 const approvalChain = computed(() =>
-  buildMeetingApprovalChain(auth.user?.display_name ?? '—', phase.value, {
+  buildMeetingApprovalChain(applicantName.value, phase.value, {
     gnMeeting: isGnMeeting.value,
   }),
 )
@@ -204,7 +209,7 @@ onMounted(load)
         </div>
       </div>
       <div class="oa-user">
-        <span>{{ auth.user?.display_name ?? '员工' }}</span>
+        <span>{{ applicantName }}</span>
         <span class="oa-user-id">{{ auth.user?.employee_id ?? '' }}</span>
       </div>
     </header>
@@ -248,7 +253,7 @@ onMounted(load)
             <tbody>
               <tr>
                 <th>预约人</th>
-                <td>{{ auth.user?.display_name ?? '—' }}</td>
+                <td>{{ applicantName }}</td>
                 <th>工号</th>
                 <td>{{ auth.user?.employee_id ?? '—' }}</td>
               </tr>

@@ -7,6 +7,140 @@ import re
 # 占位职级/岗位，不算用户已确认
 GENERIC_POSITIONS = frozenset({"", "员工", "管理员", "unknown"})
 
+# 登录账号默认展示名，不能当作用户真实姓名/发件人
+GENERIC_ACCOUNT_NAMES = frozenset({"", "管理员", "员工", "用户", "admin", "user"})
+
+_NAME_ITEM_KEYS = frozenset({"姓名", "名字", "display_name"})
+_EMAIL_ITEM_KEYS = frozenset({"邮箱", "电子邮箱", "email"})
+
+# 扩展记忆条目 key → structured 字段（structured 为空时回填）
+_STRUCTURED_ITEM_ALIASES: dict[str, str] = {
+    "姓名": "display_name",
+    "名字": "display_name",
+    "display_name": "display_name",
+    "性别": "gender",
+    "身份证号": "id_number",
+    "身份证": "id_number",
+    "工号": "employee_id",
+    "员工编号": "employee_id",
+    "岗位": "job_role",
+    "岗位类型": "position",
+    "职位": "position",
+    "职级": "position",
+    "常驻地（Base）": "base_location",
+    "常驻地": "base_location",
+    "Base": "base_location",
+    "BASE": "base_location",
+    "Base地": "base_location",
+    "base地": "base_location",
+    "部门": "department",
+    "所属部门": "department",
+    "默认部门": "department",
+    "邮箱": "email",
+    "电子邮箱": "email",
+    "email": "email",
+    "交通偏好": "travel_mode_preference",
+    "出行偏好": "travel_mode_preference",
+    "差旅偏好": "travel_mode_preference",
+    "关联项目": "related_projects",
+    "负责项目": "related_projects",
+}
+
+
+def merge_memory_for_use(
+    structured: dict | None,
+    memory_items: list[dict] | None = None,
+    *,
+    account_display_name: str = "",
+    account_employee_id: str = "",
+) -> dict:
+    """合并 structured 与扩展记忆，供对话/填单/确认卡统一回填。"""
+    result = dict(structured or {})
+
+    for item in memory_items or []:
+        key = str(item.get("key") or "").strip()
+        value = str(item.get("value") or "").strip()
+        if not key or not value:
+            continue
+        field = _STRUCTURED_ITEM_ALIASES.get(key)
+        if not field:
+            continue
+        if field == "related_projects":
+            if not result.get("related_projects"):
+                parts = re.split(r"[,，、]", value)
+                result["related_projects"] = [p.strip() for p in parts if p.strip()]
+            continue
+        if not str(result.get(field) or "").strip():
+            result[field] = value
+
+    result["display_name"] = resolve_user_display_name(
+        result,
+        memory_items,
+        account_display_name=account_display_name,
+    )
+    if not str(result.get("employee_id") or "").strip() and account_employee_id:
+        result["employee_id"] = account_employee_id.strip()
+    return result
+
+
+def resolve_id_number_for_form(structured: dict | None) -> str:
+    """填单用证件号：优先身份证号，否则合法工号，最后演示占位。"""
+    structured = structured or {}
+    id_number = str(structured.get("id_number") or "").strip()
+    if len(id_number) >= 15:
+        return id_number
+    employee_id = str(structured.get("employee_id") or "").strip()
+    if len(employee_id) >= 15:
+        return employee_id
+    return "110101199001011234"
+
+def is_generic_account_label(value: str) -> bool:
+    return (value or "").strip().lower() in GENERIC_ACCOUNT_NAMES
+
+
+def resolve_user_display_name(
+    structured: dict | None,
+    memory_items: list[dict] | None = None,
+    *,
+    account_display_name: str = "",
+) -> str:
+    """优先使用长期记忆中的姓名，避免回退到登录账号占位名（如「管理员」）。"""
+    structured = structured or {}
+    name = str(structured.get("display_name") or "").strip()
+    if name and not is_generic_account_label(name):
+        return name
+
+    for item in memory_items or []:
+        key = str(item.get("key") or "").strip()
+        value = str(item.get("value") or "").strip()
+        if key in _NAME_ITEM_KEYS and value and not is_generic_account_label(value):
+            return value
+
+    account = str(account_display_name or "").strip()
+    if account and not is_generic_account_label(account):
+        return account
+    if name and not is_generic_account_label(name):
+        return name
+    return ""
+
+
+def resolve_user_email(
+    structured: dict | None,
+    memory_items: list[dict] | None = None,
+) -> str:
+    """从长期记忆读取用户邮箱，用于邮件发件人展示。"""
+    structured = structured or {}
+    email = str(structured.get("email") or "").strip()
+    if email and "@" in email:
+        return email
+
+    for item in memory_items or []:
+        key = str(item.get("key") or "").strip().lower()
+        value = str(item.get("value") or "").strip()
+        if (key in _EMAIL_ITEM_KEYS or item.get("key") in _EMAIL_ITEM_KEYS) and "@" in value:
+            return value
+    return ""
+
 # 岗位类型仅两类（长期记忆 + 信息收集）
 POSITION_TYPE_MANAGEMENT = "管理岗"
 POSITION_TYPE_NON_MANAGEMENT = "非管理岗"
@@ -228,18 +362,27 @@ def build_user_memory_snippets(
     if not memory_enabled:
         return ""
 
-    name = (structured.get("display_name") or display_name or "").strip()
-    job_role = (structured.get("job_role") or "").strip()
-    position = (structured.get("position") or "").strip()
-    base_location = (structured.get("base_location") or "").strip()
-    gender = (structured.get("gender") or "").strip()
-    employee_id = (structured.get("employee_id") or "").strip()
-    id_number = (structured.get("id_number") or "").strip()
-    projects = structured.get("related_projects") or []
+    name = resolve_user_display_name(
+        structured,
+        memory_items,
+        account_display_name=display_name,
+    )
+    merged = merge_memory_for_use(
+        structured,
+        memory_items,
+        account_display_name=display_name,
+    )
+    job_role = (merged.get("job_role") or "").strip()
+    position = (merged.get("position") or "").strip()
+    base_location = (merged.get("base_location") or "").strip()
+    gender = (merged.get("gender") or "").strip()
+    employee_id = (merged.get("employee_id") or "").strip()
+    id_number = (merged.get("id_number") or "").strip()
+    projects = merged.get("related_projects") or []
 
     lines = [
         "\n【当前用户长期记忆（必须优先使用，勿重复追问已知信息）】",
-        f"- 姓名：{name or display_name}（写邮件/填单时直接使用，禁止再询问用户姓名）",
+        f"- 姓名：{name or '（未填写）'}（写邮件/填单时直接使用，禁止再询问用户姓名）",
     ]
 
     if gender and gender != "unknown":
@@ -270,9 +413,9 @@ def build_user_memory_snippets(
             "- 岗位类型：尚未确认（仅当办事确实需要且用户未提供时，可礼貌询问一次）"
         )
 
-    dept = (structured.get("department") or "").strip()
-    email = (structured.get("email") or "").strip()
-    travel_pref = (structured.get("travel_mode_preference") or "").strip()
+    dept = (merged.get("department") or "").strip()
+    email = resolve_user_email(merged, memory_items)
+    travel_pref = (merged.get("travel_mode_preference") or "").strip()
     if dept:
         lines.append(f"- 部门：{dept}")
     if email:

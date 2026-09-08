@@ -108,6 +108,8 @@ async def confirm_email_sent(
         recipient=body.recipient,
         subject=body.subject,
         message_id=body.message_id,
+        body=body.body,
+        sent_at=body.sent_at,
     )
     if result is None:
         return JSONResponse(
@@ -161,5 +163,37 @@ async def create_gn_meeting(
         return JSONResponse(
             status_code=400,
             content=error("无法创建国能会议，请确认任务与表单有效", code=400),
+        )
+    return success(result.model_dump())
+
+
+@router.post("/{task_id}/transport-booking-create")
+async def create_transport_booking(
+    task_id: str,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    result = await svc.create_transport_booking(current_user.id, task_id)
+    if result is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法完成交通预订，请确认任务与表单有效", code=400),
+        )
+    return success(result.model_dump())
+
+
+@router.post("/{task_id}/hotel-booking-create")
+async def create_hotel_booking(
+    task_id: str,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    result = await svc.create_hotel_booking(current_user.id, task_id)
+    if result is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法完成酒店预订，请确认任务与表单有效", code=400),
         )
     return success(result.model_dump())

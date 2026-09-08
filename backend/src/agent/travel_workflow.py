@@ -67,8 +67,14 @@ def build_default_email_signature(
     display_name: str = "",
     memory_items: list[dict] | None = None,
 ) -> str:
+    from src.agent.user_memory import resolve_user_display_name
+
     dept = str((structured or {}).get("department") or "").strip()
-    name = str((structured or {}).get("display_name") or display_name or "").strip()
+    name = resolve_user_display_name(
+        structured,
+        memory_items,
+        account_display_name=display_name,
+    )
 
     for item in memory_items or []:
         key = str(item.get("key") or "").strip()
@@ -77,12 +83,39 @@ def build_default_email_signature(
             continue
         if key in ("部门", "所属部门") and not dept:
             dept = value
-        if key in ("姓名", "名字") and not name:
-            name = value
 
     if dept and name:
         return f"{dept}{name}"
     return dept or name
+
+
+def extract_email_recipient_from_text(text: str) -> tuple[str | None, str]:
+    """从用户话术中解析邮件收件人（与是否含出差表述无关）。"""
+    if not (text or "").strip():
+        return None, "项目经理"
+    pm = _PM_PATTERN.search(text)
+    if pm:
+        return pm.group(1), "项目经理"
+    titled = re.search(
+        r"(?:发邮件给|写邮件给|邮件给|给)\s*"
+        r"([\u4e00-\u9fff]{1,4}(?:经理|总|主任|老师|工))",
+        text,
+    )
+    if titled:
+        return titled.group(1), "项目经理"
+    to_match = re.search(
+        r"(?:发邮件给|写邮件给|邮件给|给)\s*([\u4e00-\u9fff]{2,4})(?=[，,。；;\s]|$)",
+        text,
+    )
+    if to_match:
+        return to_match.group(1), "项目经理"
+    notify = re.search(
+        r"(?:发给|写给)\s*([\u4e00-\u9fff]{2,4}(?:经理|总|主任|老师|工)?)",
+        text,
+    )
+    if notify:
+        return notify.group(1), "项目经理"
+    return None, "项目经理"
 
 
 def build_default_email_subject(plan: TravelPlan) -> str:
@@ -130,6 +163,13 @@ def enrich_email_plan_from_memory(
     display_name: str = "",
     memory_items: list[dict] | None = None,
 ) -> TravelPlan:
+    from src.agent.user_memory import resolve_user_display_name
+
+    sender_name = resolve_user_display_name(
+        structured,
+        memory_items,
+        account_display_name=display_name,
+    )
     combined = plan.raw_goal or ""
     if not plan.email_cc:
         cc_match = re.search(r"抄送[:：]?\s*([^\n，,。；;]+)", combined)
@@ -137,7 +177,7 @@ def enrich_email_plan_from_memory(
     if not plan.email_subject:
         plan.email_subject = build_default_email_subject(plan)
     if not plan.email_body:
-        plan.email_body = build_default_email_body(plan, display_name)
+        plan.email_body = build_default_email_body(plan, sender_name)
     if not (plan.email_signature or "").strip():
         plan.email_signature = build_default_email_signature(
             structured, display_name, memory_items
@@ -242,24 +282,12 @@ def build_email_plan_confirm_content(
     display_name: str = "",
     memory_items: list[dict] | None = None,
 ) -> str:
-    plan = enrich_email_plan_from_memory(
+    enrich_email_plan_from_memory(
         plan, structured, display_name, memory_items
     )
-    intro = (
-        "已根据您补充的信息更新邮件内容，请核对："
-        if updated
-        else "请核对以下邮件内容："
-    )
-    lines = [intro, ""]
-    for item in build_email_plan_confirm_items(plan):
-        lines.append(f"- {item['label']}：{item['value']}")
-    lines.extend(
-        [
-            "",
-            "👇 请确认无误后点击下方「确认并开始写邮件」，无需再用文字回复。",
-        ]
-    )
-    return "\n".join(lines)
+    if updated:
+        return "已根据您补充的信息更新，请在下方卡片中核对邮件内容。"
+    return "请在下方卡片中核对邮件信息，确认无误后点击「确认并开始写邮件」。"
 
 
 def is_travel_workflow_intent(text: str) -> bool:
@@ -383,24 +411,12 @@ def build_travel_plan(
         if re.search(r"从\s*北京|北京\s*(?:到|去|出发)", combined):
             plan.origin = "北京"
 
-    pm = _PM_PATTERN.search(combined)
-    if pm and is_email_workflow_intent(combined) and not is_travel_workflow_intent(combined):
-        plan.email_recipient = pm.group(1)
-        plan.email_recipient_title = "项目经理"
-    elif is_email_workflow_intent(combined) and not is_travel_workflow_intent(combined):
-        notify = re.search(
-            r"(?:通知|告知|发给|写给)\s*([\u4e00-\u9fff]{2,4})",
-            combined,
-        )
-        if notify:
-            plan.email_recipient = notify.group(1)
-        else:
-            to_match = re.search(
-                r"(?:发邮件给|写邮件给|邮件给|给)\s*([\u4e00-\u9fff]{2,6}(?:经理|总|主任|老师|工)?)",
-                combined,
-            )
-            if to_match:
-                plan.email_recipient = to_match.group(1)
+    if is_email_workflow_intent(combined):
+        recipient, title = extract_email_recipient_from_text(combined)
+        if recipient:
+            plan.email_recipient = recipient
+            plan.email_recipient_title = title
+        plan.needs_email = True
 
     if re.search(r"经济舱|公务舱|二等座|一等座|软席|硬席", combined):
         m = re.search(r"经济舱|公务舱|二等座|一等座|软席|硬席", combined)
@@ -615,6 +631,39 @@ def _travel_end_label(plan: TravelPlan) -> str:
     return "—"
 
 
+def needs_return_transport(plan: TravelPlan) -> bool:
+    """往返出差需分别预订去程与返程交通。"""
+    if plan.return_hint:
+        return True
+    return bool(plan.trip_days and plan.trip_days > 1)
+
+
+def resolve_base_location(plan: TravelPlan, structured: dict | None = None) -> str:
+    return (
+        plan.origin
+        or _origin_from_structured(structured)
+        or "北京"
+    )
+
+
+def active_booking_leg_from_plan(wf_plan: dict | None) -> str:
+    if not wf_plan:
+        return "outbound"
+    from src.agent.workflow_plan import _node_by_id
+
+    node = _node_by_id(wf_plan, "booking")
+    if not node:
+        return "outbound"
+    progress = node.get("booking_progress")
+    if not isinstance(progress, dict):
+        return "outbound"
+    if not progress.get("needs_return"):
+        return "outbound"
+    if progress.get("outbound") == "completed" and progress.get("return") != "completed":
+        return "return"
+    return "outbound"
+
+
 def is_ready_for_transport_booking(plan: TravelPlan) -> bool:
     return bool(plan.destination and (plan.departure_hint or plan.trip_days))
 
@@ -700,15 +749,24 @@ _WEEKDAY_DEPARTURE_RE = re.compile(
     r"(下(?:周|礼拜)|本(?:周|礼拜)|(?:这)?周)?([一二三四五六日])\s*"
     r"(?="
     r"(?:上午|下午|早上|晚上|清晨)?\s*(?:的)?(?:机)?(?:票|航班|高铁|火车|动车|车次)"
-    r"|(?:出发|去|走|启程|起程)"
+    r"|(?:出发|去|走|启程|起程|到达|抵达|赶到)"
     r")"
     r"(?:上午|下午|早上|晚上|清晨)?\s*(?:的)?(?:机)?(?:票|航班|高铁|火车|动车|车次)?"
-    r"(?:出发|去|走|启程|起程)?",
+    r"(?:出发|去|走|启程|起程|到达|抵达|赶到)?",
+)
+
+_WEEKDAY_ARRIVAL_RE = re.compile(
+    r"(下(?:周|礼拜)|本(?:周|礼拜)|(?:这)?周)?([一二三四五六日])"
+    r"(?:上午|下午|早上|晚上|清晨)?"
+    r"(?:\d{1,2}\s*点\s*(?:半)?\s*(?:前|之前|以内|内))?"
+    r".{0,16}?(?:到达|抵达|赶到)",
 )
 
 _WEEKDAY_RETURN_RE = re.compile(
-    r"(下(?:周|礼拜)|本(?:周|礼拜)|(?:这)?周)?([一二三四五六日])\s*"
-    r"(?:返回|回来|回程|返程|回)(?!收)",
+    r"(下(?:周|礼拜)|本(?:周|礼拜)|(?:这)?周)?([一二三四五六日])"
+    r"(?:上午|下午|早上|晚上|清晨)?"
+    r"(?:[^。，；！？\n]{0,16}?(?:飞机|航班|高铁|火车|动车))?"
+    r"(?:返回|回来|回程|返程|飞回|回(?!收))",
 )
 
 
@@ -723,14 +781,19 @@ def _weekday_char_to_iso(
     target = _WEEKDAY_CHAR_MAP.get(weekday_char)
     if target is None:
         return ""
+    this_week_monday = today - timedelta(days=today.weekday())
     if prefix.startswith("下"):
-        delta = (target - today.weekday()) % 7 + 7
-    elif prefix.startswith("本") or prefix in ("周", "这周"):
-        delta = (target - today.weekday()) % 7
-    else:
-        delta = (target - today.weekday()) % 7
-        if delta == 0:
-            delta = 7
+        # 下周X = 下一自然周（以周一为起点）的星期 X
+        week_monday = this_week_monday + timedelta(days=7)
+        return (week_monday + timedelta(days=target)).isoformat()
+    if prefix.startswith("本") or prefix in ("周", "这周"):
+        candidate = this_week_monday + timedelta(days=target)
+        if candidate < today:
+            candidate += timedelta(days=7)
+        return candidate.isoformat()
+    delta = (target - today.weekday()) % 7
+    if delta == 0:
+        delta = 7
     return (today + timedelta(days=delta)).isoformat()
 
 
@@ -750,8 +813,12 @@ def _return_weekday_iso(
         departure = date.fromisoformat(departure_iso)
     except ValueError:
         departure = today
-    if prefix.startswith("下"):
-        return _weekday_char_to_iso(weekday_char, prefix=prefix, today=today)
+    if prefix.startswith("下") or prefix.startswith("本") or prefix in ("周", "这周"):
+        dep_week_monday = departure - timedelta(days=departure.weekday())
+        candidate = dep_week_monday + timedelta(days=target)
+        if candidate >= departure:
+            return candidate.isoformat()
+        return (dep_week_monday + timedelta(days=7 + target)).isoformat()
     delta = (target - departure.weekday()) % 7
     if delta == 0:
         delta = 7
@@ -862,7 +929,7 @@ def _apply_travel_schedule_from_text(plan: TravelPlan, text: str) -> None:
         _finalize_trip_days_from_hints(plan)
         return
 
-    dep_match = _WEEKDAY_DEPARTURE_RE.search(text)
+    dep_match = _WEEKDAY_DEPARTURE_RE.search(text) or _WEEKDAY_ARRIVAL_RE.search(text)
     if dep_match:
         dep_iso = _weekday_char_to_iso(
             dep_match.group(2),
@@ -1027,6 +1094,18 @@ def travel_plan_confirm_fields(plan: TravelPlan) -> dict[str, str]:
     mode, other = _resolve_transport_mode_label(plan)
     start_iso = _hint_to_iso(plan.departure_hint)
     end_iso = _hint_to_iso(plan.return_hint)
+    if start_iso and end_iso:
+        try:
+            start = date.fromisoformat(start_iso)
+            end = date.fromisoformat(end_iso)
+            if end < start:
+                stay_days = plan.trip_days or extract_trip_days(plan.raw_goal or "")
+                if stay_days and stay_days >= 2:
+                    end_iso = (start + timedelta(days=max(stay_days, 1))).isoformat()
+                else:
+                    end_iso = ""
+        except ValueError:
+            pass
     if not end_iso and start_iso and plan.trip_days:
         try:
             start = datetime.fromisoformat(start_iso).date()
@@ -1141,13 +1220,17 @@ def build_travel_plan_confirm_metadata(plan: TravelPlan) -> dict:
 
 
 def resolve_transport_booking_type(text: str, plan: TravelPlan | None = None) -> str:
-    """根据用户话术或差旅单交通方式，判定展示航班还是火车备选。"""
+    """根据用户话术或差旅单交通方式，判定展示航班、火车或自驾。"""
+    if re.search(r"自驾|开车|自己开车", text):
+        return "drive"
     if _FLIGHT_BOOK.search(text):
         return "flight"
     if _TRAIN_BOOK.search(text):
         return "train"
     if plan is not None:
         mode, _ = _resolve_transport_mode_label(plan)
+        if mode == "自驾":
+            return "drive"
         if mode == "飞机":
             return "flight"
         if mode == "火车":
@@ -1160,26 +1243,55 @@ def build_booking_selection_content(
     *,
     booking_kind: str | None = None,
     transport_type: str | None = None,
+    leg: str = "outbound",
+    base_location: str | None = None,
+    needs_return: bool = False,
 ) -> str:
     dest = plan.destination or "目的地"
-    origin = plan.origin or "北京"
+    base = base_location or plan.origin or "北京"
+    if leg == "return":
+        origin = dest
+        route_dest = base
+        dep_hint = plan.return_hint or plan.departure_hint
+        leg_label = "返程"
+    else:
+        origin = plan.origin or base
+        route_dest = dest
+        dep_hint = plan.departure_hint
+        leg_label = "去程"
+
     if booking_kind == "transport":
         mode = transport_type or resolve_transport_booking_type("", plan)
-        label = "航班" if mode == "flight" else "火车/高铁"
+        if mode == "drive":
+            mode_label = "自驾"
+        elif mode == "flight":
+            mode_label = "航班"
+        else:
+            mode_label = "火车/高铁"
         lines = [
-            f"已为您查询「{origin} → {dest}」的可选{label}方案。",
+            f"已为您查询**{leg_label}**「{origin} → {route_dest}」的可选{mode_label}方案。",
             "",
-            f"- 出发地：{origin}；目的地：{dest}",
+            f"- {leg_label}：{origin} → {route_dest}",
         ]
-        if plan.departure_hint:
-            lines.append(f"- 出发时间：{plan.departure_hint}")
-        pick_hint = "航班" if mode == "flight" else "车次"
-        lines.extend(
-            [
-                "",
-                f"👇 **请在下方点选{pick_hint}**，选好后点击「确认预订」。",
-            ]
-        )
+        if dep_hint:
+            lines.append(f"- 出发日期：{dep_hint}")
+        if needs_return and leg == "outbound":
+            lines.append(f"- 返程：{route_dest} → {base}（确认去程后继续选择）")
+        if mode == "drive":
+            lines.extend(
+                [
+                    "",
+                    "👇 **已选择自驾**，确认后将记录本段行程，无需预订车票/机票。",
+                ]
+            )
+        else:
+            pick_hint = "航班" if mode == "flight" else "车次"
+            lines.extend(
+                [
+                    "",
+                    f"👇 **请先选择交通方式**，再点选{pick_hint}，完成后点击「确认预订」。",
+                ]
+            )
         return "\n".join(lines)
 
     if booking_kind == "hotel":
@@ -1227,6 +1339,9 @@ def build_booking_selection_metadata(
     booking_kind: str | None = None,
     transport_type: str | None = None,
     user_text: str = "",
+    leg: str = "outbound",
+    base_location: str | None = None,
+    needs_return: bool = False,
 ) -> dict:
     if booking_kind == "transport":
         needs_flight, needs_hotel = True, False
@@ -1234,16 +1349,34 @@ def build_booking_selection_metadata(
     elif booking_kind == "hotel":
         needs_flight, needs_hotel = False, True
         mode = None
+        leg = "outbound"
+        needs_return = False
     else:
         needs_flight = plan.needs_transport
         needs_hotel = plan.needs_hotel
         mode = resolve_transport_booking_type(user_text, plan) if plan.needs_transport else None
+
+    base = base_location or plan.origin or "北京"
+    dest = plan.destination or "目的地"
+    if leg == "return":
+        route_origin, route_dest = dest, base
+        departure_date = plan.return_hint or plan.departure_hint or ""
+    else:
+        route_origin, route_dest = plan.origin or base, dest
+        departure_date = plan.departure_hint or ""
+
     selection: dict = {
         "status": "pending",
         "booking_kind": booking_kind,
         "needs_flight": needs_flight,
         "needs_hotel": needs_hotel,
-        "destination": plan.destination or "",
+        "leg": leg,
+        "needs_return": needs_return,
+        "origin": route_origin,
+        "destination": route_dest,
+        "base_location": base,
+        "departure_date": departure_date,
+        "return_date": plan.return_hint or "",
         "flights": booking.get("flights") or [],
         "trains": booking.get("trains") or [],
         "hotels": booking.get("hotels") or [],
@@ -1341,12 +1474,18 @@ def build_task_metadata(plan: TravelPlan, task_id: str) -> dict:
     }
 
 
-def build_transport_task_metadata(plan: TravelPlan, task_id: str, flight: dict) -> dict:
+def build_transport_task_metadata(
+    plan: TravelPlan,
+    task_id: str,
+    flight: dict,
+    *,
+    leg: str = "outbound",
+) -> dict:
     dest = plan.destination or flight.get("destination") or "目的地"
-    flight_no = flight.get("flight_no") or "—"
+    leg_prefix = "去程" if leg == "outbound" else "返程"
     return {
         "task_id": task_id,
-        "task_title": f"{dest}·订车票",
+        "task_title": f"{leg_prefix}·{dest}订车票",
         "progress": "1/2",
         "progress_percent": 50,
         "steps_desc": "交通预订 · 用户确认",
@@ -1416,6 +1555,9 @@ def build_email_task_metadata(
     task_id: str,
     form_id: str | None = None,
     session_id: str | None = None,
+    *,
+    sender_name: str = "",
+    sender_email: str = "",
 ) -> dict:
     title = (plan.email_subject or "写邮件").strip()[:80]
     return {
@@ -1433,5 +1575,7 @@ def build_email_task_metadata(
             "subject": plan.email_subject or "",
             "body": plan.email_body or "",
             "signature": plan.email_signature or "",
+            "from_name": sender_name,
+            "from_email": sender_email,
         },
     }

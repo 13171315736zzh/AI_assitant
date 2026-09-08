@@ -300,37 +300,69 @@ async def search_hotels(
     return hotels[:3]
 
 
-async def query_travel_bookings(plan, *, transport_type: str | None = None) -> TravelBookingSnapshot:
-    """根据 TravelPlan 查询航班/火车与酒店；transport_type 为 flight 或 train。"""
+async def query_travel_bookings(
+    plan,
+    *,
+    transport_type: str | None = None,
+    leg: str = "outbound",
+    base_location: str | None = None,
+) -> TravelBookingSnapshot:
+    """根据 TravelPlan 查询航班/火车与酒店；leg 为 outbound/return。"""
     flights: list[FlightOption] = []
     trains: list[TrainOption] = []
     hotels: list[HotelOption] = []
 
     if plan.needs_transport:
-        origin = plan.origin_airport or plan.origin or "北京"
-        if "机场" in origin:
-            origin_city = "北京"
-            origin_airport = origin
+        base = base_location or plan.origin or "北京"
+        origin_airport = None
+        if leg == "return":
+            origin_city = plan.destination or "目的地"
+            dest = base
+            dep_hint = plan.return_hint or plan.departure_hint
         else:
-            origin_city = origin
-            origin_airport = plan.origin_airport
-        dest = plan.destination or "目的地"
-        mode = transport_type or "flight"
-        if mode == "train":
+            origin = plan.origin_airport or plan.origin or "北京"
+            if "机场" in str(origin):
+                origin_city = "北京"
+                origin_airport = origin
+            else:
+                origin_city = origin
+                origin_airport = plan.origin_airport
+            dest = plan.destination or "目的地"
+            dep_hint = plan.departure_hint
+
+        mode = transport_type
+        if mode == "drive":
+            pass
+        elif mode == "train":
             trains = await search_trains(
                 origin_city,
                 dest,
-                departure_hint=plan.departure_hint,
+                departure_hint=dep_hint,
                 seat_pref=plan.transport_pref,
             )
-        else:
+        elif mode == "flight":
             flights = await search_flights(
                 origin_city,
                 dest,
-                origin_airport=origin_airport,
-                departure_hint=plan.departure_hint,
+                origin_airport=origin_airport if leg != "return" else None,
+                departure_hint=dep_hint,
                 cabin_pref=plan.transport_pref,
-                arrival_before=plan.arrival_deadline,
+                arrival_before=plan.arrival_deadline if leg != "return" else None,
+            )
+        else:
+            trains = await search_trains(
+                origin_city,
+                dest,
+                departure_hint=dep_hint,
+                seat_pref=plan.transport_pref,
+            )
+            flights = await search_flights(
+                origin_city,
+                dest,
+                origin_airport=origin_airport if leg != "return" else None,
+                departure_hint=dep_hint,
+                cabin_pref=plan.transport_pref,
+                arrival_before=plan.arrival_deadline if leg != "return" else None,
             )
 
     if plan.needs_hotel:

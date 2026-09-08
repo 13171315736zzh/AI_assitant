@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any
 
 from src.agent.leave_workflow import build_leave_plan, missing_slots as leave_missing_slots
@@ -13,7 +14,11 @@ from src.agent.info_collect_workflow import (
 from src.agent.meeting_workflow import build_meeting_plan, has_meeting_schedule, missing_slots as meeting_missing_slots
 from src.agent.session_context import load_session_context, merge_user_texts
 from src.agent.travel_policy_rules import extract_trip_days
-from src.agent.travel_workflow import build_travel_plan, missing_slots as travel_missing_slots
+from src.agent.travel_workflow import (
+    build_travel_plan,
+    missing_slots as travel_missing_slots,
+    resolve_transport_booking_type,
+)
 from src.agent.workpackage_workflow import (
     build_workpackage_plan,
     missing_slots as workpackage_missing_slots,
@@ -333,7 +338,51 @@ def _booking_gate_open(plan: dict[str, Any]) -> bool:
     booking = _node_by_id(plan, "booking")
     if booking is None:
         return True
-    return booking.get("status") in ("submitted", "completed")
+    if booking.get("status") in ("submitted", "completed"):
+        return True
+    progress = booking.get("booking_progress")
+    if isinstance(progress, dict) and progress.get("needs_return"):
+        if (
+            progress.get("outbound") == "completed"
+            and progress.get("return") == "completed"
+        ):
+            return True
+    return False
+
+
+async def set_booking_leg_progress(
+    message_repo,
+    session_id: str,
+    *,
+    leg: str,
+    status: str,
+    needs_return: bool,
+    outbound_selection: dict | None = None,
+) -> dict[str, Any] | None:
+    plan = await get_workflow_plan_from_session(message_repo, session_id)
+    if plan is None:
+        return None
+    node = _node_by_id(plan, "booking")
+    if node is None:
+        return plan
+    progress = dict(node.get("booking_progress") or {})
+    progress["needs_return"] = needs_return
+    progress[leg] = status
+    node["booking_progress"] = progress
+    if outbound_selection is not None:
+        node["outbound_selection"] = outbound_selection
+    await _persist_workflow_plan(message_repo, session_id, plan)
+    return plan
+
+
+def get_outbound_selection_from_plan(wf_plan: dict | None) -> dict | None:
+    if not wf_plan:
+        return None
+    node = _node_by_id(wf_plan, "booking")
+    if not node:
+        return None
+    raw = node.get("outbound_selection")
+    return dict(raw) if isinstance(raw, dict) else None
 
 
 def _resolve_node_for_activation(plan: dict[str, Any], node_id: str) -> str:
@@ -656,107 +705,433 @@ def _missing_slots_for_node(node_id: str, user_messages) -> list[str]:
     return []
 
 
+_SUMMARY_REQUEST_PATTERN = re.compile(
+    r"结果汇总|办理结果(?:汇总|详情)?|复制汇总|导出汇总|(?:请|给我)?(?:看看)?汇总(?:结果|一下)?",
+    re.I,
+)
+
+
+def is_session_summary_request(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    return bool(_SUMMARY_REQUEST_PATTERN.search(stripped))
+
+
+async def try_session_summary_reply(
+    message_repo,
+    session_id: str,
+    user_content: str,
+) -> tuple[str, str, dict | None] | None:
+    """用户主动索要办理结果汇总时，返回可复制面板，不走各业务工作流。"""
+    if not is_session_summary_request(user_content):
+        return None
+
+    plan = await get_workflow_plan_from_session(message_repo, session_id)
+    if not plan:
+        return (
+            "当前会话还没有多节点办理计划。请先说明要办理的事项，例如：「出差订机票订酒店并开国能会议」。",
+            "text",
+            None,
+        )
+
+    copy_text = await build_session_results_summary(message_repo, session_id, plan)
+    nodes = plan.get("nodes")
+    completed_labels = [
+        str(node.get("label"))
+        for node in nodes
+        if isinstance(node, dict) and node.get("status") == "completed"
+    ] if isinstance(nodes, list) else []
+
+    if completed_labels:
+        summary_label = "、".join(label for label in completed_labels if label)
+        content = "\n".join(
+            [
+                "**办理结果汇总**",
+                "",
+                f"已完成：{summary_label}。",
+                "",
+                "以下为可复制内容：",
+            ]
+        )
+    else:
+        content = "\n".join(
+            [
+                "**办理结果汇总**",
+                "",
+                "当前还没有已完成的办理节点；完成 OA 办理后再来查看即可复制保存。",
+                "",
+                "以下为当前可汇总内容：",
+            ]
+        )
+
+    return content, "text", {
+        "workflow_plan": plan,
+        "workflow_session_summary": {"text": copy_text},
+    }
+
+
 async def build_session_results_summary(
     message_repo,
     session_id: str,
     plan: dict[str, Any],
 ) -> str:
     records = await message_repo.list_recent_for_context(session_id, limit=80)
-    lines = [
-        "══════════════════════════════════════",
-        "  智能办公助手 · 本次办理结果汇总",
-        "══════════════════════════════════════",
-        "",
-        "【办理节点】",
-    ]
-
-    for node in _nodes_in_display_order(plan):
-        label = str(node.get("label") or node.get("id") or "—")
-        status = str(node.get("status") or "pending")
-        if status == "completed":
-            mark = "✅ 已完成"
-        elif status == "submitted":
-            mark = "🟡 审批中"
-        elif status == "running":
-            mark = "🔵 进行中"
-        else:
-            mark = "⬜ 待开始"
-        lines.append(f"  · {label}：{mark}")
-
-    lines.extend(["", "【办理详情】"])
-    seen_tasks: set[str] = set()
-    detail_count = 0
-
-    for record in reversed(records):
+    task_meta: dict[str, dict[str, Any]] = {}
+    for record in records:
         meta = record.metadata_json or {}
         tid = meta.get("task_id")
-        if meta.get("oa_completion") and tid and tid not in seen_tasks:
-            seen_tasks.add(tid)
-            detail_count += 1
-            title = str(meta.get("task_title") or "办事任务")
-            category = str(meta.get("category") or "")
-            lines.append(f"  {detail_count}. {title}")
-            if category == "transport_book":
-                lines.append("     类型：交通预订 · 状态：已确认")
-            elif category == "hotel_book":
-                lines.append("     类型：酒店预订 · 状态：已确认")
-            elif category == "travel":
-                lines.append("     类型：差旅申请 · 状态：已审批通过")
-            elif category == "gn_meeting":
-                lines.append("     类型：国能会议 · 状态：已创建")
-            elif category == "meeting":
-                lines.append("     类型：会议室预约 · 状态：已确认")
-            else:
-                lines.append(f"     类型：{category or '综合办事'} · 状态：已完成")
-            lines.append("")
+        if not tid:
+            continue
+        merged = task_meta.setdefault(str(tid), {})
+        for key, value in meta.items():
+            if value is not None and value is not False:
+                merged[key] = value
 
-        gn = meta.get("gn_meeting_result")
-        if isinstance(gn, dict) and gn.get("meeting_link"):
-            key = f"gn:{gn.get('meeting_link')}"
-            if key not in seen_tasks:
-                seen_tasks.add(key)
-                detail_count += 1
-                lines.append(f"  {detail_count}. 国能会议")
-                lines.append(f"     主题：{gn.get('subject') or '—'}")
-                lines.append(f"     链接：{gn.get('meeting_link')}")
-                if gn.get("meeting_password"):
-                    lines.append(f"     密码：{gn.get('meeting_password')}")
-                lines.append("")
+    lines = ["【办理详情】"]
+    detail_count = 0
 
-        room = meta.get("room_booking_result")
-        if isinstance(room, dict) and room.get("room_name"):
-            key = f"room:{room.get('room_name')}"
-            if key not in seen_tasks:
-                seen_tasks.add(key)
-                detail_count += 1
-                lines.append(f"  {detail_count}. 会议室预约")
-                lines.append(f"     会议室：{room.get('room_name')}")
-                lines.append(f"     时间：{room.get('start_time')} — {room.get('end_time')}")
-                lines.append("")
+    for node in _nodes_in_display_order(plan):
+        if node.get("status") != "completed":
+            continue
+        node_id = str(node.get("id") or "")
+        label = str(node.get("label") or _LABELS.get(node_id, node_id))
+        task_id = str(node.get("task_id") or "")
+        meta = task_meta.get(task_id, {}) if task_id else {}
+        if not meta:
+            meta = _find_meta_for_node(node_id, task_meta)
+        meta = _enrich_node_meta_from_records(node_id, meta, records, task_id)
 
-        email_sent = meta.get("email_sent_result")
-        if isinstance(email_sent, dict) and email_sent.get("recipient"):
-            key = f"email:{email_sent.get('message_id') or email_sent.get('recipient')}"
-            if key not in seen_tasks:
-                seen_tasks.add(key)
-                detail_count += 1
-                lines.append(f"  {detail_count}. 邮件通知")
-                lines.append(f"     收件人：{email_sent.get('recipient')}")
-                lines.append(f"     主题：{email_sent.get('subject') or '—'}")
-                lines.append("")
-
-    if detail_count == 0:
-        lines.append("  （暂无结构化结果，请查看上方对话记录）")
+        detail_count += 1
+        lines.append(f"  {detail_count}. {label}")
+        lines.extend(_format_node_result_lines(node_id, meta))
         lines.append("")
 
-    lines.extend(
-        [
-            "──────────────────────────────────────",
-            "如需继续办理其他事项，请直接告诉我。",
-            "══════════════════════════════════════",
-        ]
-    )
+    if detail_count == 0:
+        lines.append("  （暂无已完成节点）")
+
+    while lines and lines[-1] == "":
+        lines.pop()
+
     return "\n".join(lines)
+
+
+def _detail_line(key: str, value: str | None) -> str:
+    text = str(value or "").strip()
+    return f"     {key}：{text or '—'}"
+
+
+def _format_datetime_display(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            dt = dt.astimezone().replace(tzinfo=None)
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return text[:16] if len(text) > 16 else text
+
+
+def _format_date_display(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "—"
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return text
+    return _format_datetime_display(text)
+
+
+def _find_meta_for_node(node_id: str, task_meta: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    result_keys = {
+        "gn_meeting": "gn_meeting_result",
+        "email": "email_sent_result",
+        "room": "room_booking_result",
+        "travel": "travel_apply_result",
+        "booking": "transport_booking_result",
+        "hotel": "hotel_booking_result",
+        "workpackage": "workpackage_result",
+        "leave": "leave_result",
+    }
+    key = result_keys.get(node_id)
+    if not key:
+        return {}
+    for meta in task_meta.values():
+        value = meta.get(key)
+        if value:
+            return meta
+    return {}
+
+
+def _transport_booking_from_selection(selection: dict) -> dict[str, str] | None:
+    is_train = selection.get("transport_type") == "train"
+    mode = "高铁" if is_train else "机票"
+    origin = str(selection.get("origin") or "—")
+    destination = str(selection.get("destination") or "—")
+    options = selection.get("trains") if is_train else selection.get("flights")
+    if not isinstance(options, list) or not options:
+        return {
+            "transport_mode": mode,
+            "origin": origin,
+            "destination": destination,
+            "flight_no": "—",
+            "departure_date": "—",
+            "departure_time": "—",
+        }
+    picked = options[0] if isinstance(options[0], dict) else None
+    if not picked:
+        return None
+    dep_time = str(picked.get("departure_time") or "")
+    dep_date = dep_time.split(" ")[0] if dep_time else "—"
+    dep_clock = dep_time.split(" ")[1] if " " in dep_time else "—"
+    ticket_no = str(picked.get("train_no") or picked.get("flight_no") or "—")
+    return {
+        "transport_mode": mode,
+        "origin": str(picked.get("origin") or origin),
+        "destination": str(picked.get("destination") or destination),
+        "flight_no": ticket_no,
+        "departure_date": dep_date,
+        "departure_time": dep_clock,
+    }
+
+
+def _transport_mode_from_travel_confirm(record_meta: dict) -> str | None:
+    confirm = record_meta.get("travel_plan_confirm")
+    if not isinstance(confirm, dict) or confirm.get("email_only"):
+        return None
+    raw = str(confirm.get("transport_mode") or "").strip()
+    mapping = {"飞机": "机票", "火车": "高铁", "自驾": "自驾", "其他": "—"}
+    return mapping.get(raw, raw or None)
+
+
+def _hotel_booking_from_selection(selection: dict) -> dict[str, str] | None:
+    hotels = selection.get("hotels")
+    if not isinstance(hotels, list) or not hotels:
+        return None
+    hotel = hotels[0] if isinstance(hotels[0], dict) else None
+    if not hotel:
+        return None
+    amount = hotel.get("price_per_night")
+    return {
+        "hotel_name": str(hotel.get("name") or "—"),
+        "room_type": str(hotel.get("room_type") or "—"),
+        "amount": str(amount) if amount is not None else "—",
+        "check_in": str(hotel.get("check_in") or "—"),
+        "check_out": str(hotel.get("check_out") or "—"),
+    }
+
+
+def _enrich_node_meta_from_records(
+    node_id: str,
+    meta: dict[str, Any],
+    records,
+    task_id: str,
+) -> dict[str, Any]:
+    enriched = dict(meta)
+
+    if node_id == "booking":
+        existing = enriched.get("transport_booking_result")
+        if isinstance(existing, dict):
+            has_route = str(existing.get("origin") or "").strip() not in ("", "—")
+            has_mode = str(existing.get("transport_mode") or "").strip() not in ("", "—")
+            if has_route and has_mode:
+                return enriched
+
+        for record in reversed(records):
+            record_meta = record.metadata_json or {}
+            if task_id and record_meta.get("task_id") == task_id:
+                tb = record_meta.get("transport_booking_result")
+                if isinstance(tb, dict):
+                    enriched["transport_booking_result"] = tb
+                    return enriched
+
+        for record in reversed(records):
+            record_meta = record.metadata_json or {}
+            tb = record_meta.get("transport_booking_result")
+            if isinstance(tb, dict) and str(tb.get("origin") or tb.get("flight_no") or "").strip() not in ("", "—"):
+                enriched["transport_booking_result"] = tb
+                return enriched
+
+        for record in reversed(records):
+            record_meta = record.metadata_json or {}
+            selection = record_meta.get("booking_selection")
+            if not isinstance(selection, dict):
+                continue
+            if selection.get("booking_kind") not in (None, "transport") and not selection.get("needs_flight"):
+                continue
+            picked = _transport_booking_from_selection(selection)
+            if picked:
+                mode = _transport_mode_from_travel_confirm(record_meta)
+                if mode and mode != "—":
+                    picked["transport_mode"] = mode
+                enriched["transport_booking_result"] = picked
+                return enriched
+
+        for record in reversed(records):
+            record_meta = record.metadata_json or {}
+            confirm = record_meta.get("travel_plan_confirm")
+            if not isinstance(confirm, dict) or confirm.get("email_only"):
+                continue
+            mode = _transport_mode_from_travel_confirm(record_meta)
+            origin = str(confirm.get("origin") or "—")
+            destination = str(confirm.get("destination") or "—")
+            if mode or origin != "—" or destination != "—":
+                enriched["transport_booking_result"] = {
+                    "transport_mode": mode or "—",
+                    "origin": origin,
+                    "destination": destination,
+                    "flight_no": "—",
+                    "departure_date": str(confirm.get("start_date") or "—"),
+                    "departure_time": "—",
+                }
+                return enriched
+
+        return enriched
+
+    if node_id != "hotel":
+        return enriched
+
+    existing = enriched.get("hotel_booking_result")
+    if isinstance(existing, dict) and str(existing.get("hotel_name") or "").strip() not in ("", "—"):
+        return enriched
+
+    for record in reversed(records):
+        record_meta = record.metadata_json or {}
+        if task_id and record_meta.get("task_id") == task_id:
+            hb = record_meta.get("hotel_booking_result")
+            if isinstance(hb, dict):
+                enriched["hotel_booking_result"] = hb
+                return enriched
+
+    for record in reversed(records):
+        record_meta = record.metadata_json or {}
+        hb = record_meta.get("hotel_booking_result")
+        if isinstance(hb, dict) and str(hb.get("hotel_name") or "").strip() not in ("", "—"):
+            enriched["hotel_booking_result"] = hb
+            return enriched
+
+    for record in reversed(records):
+        record_meta = record.metadata_json or {}
+        selection = record_meta.get("booking_selection")
+        if not isinstance(selection, dict):
+            continue
+        if selection.get("booking_kind") not in (None, "hotel") and not selection.get("needs_hotel"):
+            continue
+        picked = _hotel_booking_from_selection(selection)
+        if picked:
+            enriched["hotel_booking_result"] = picked
+            return enriched
+
+    return enriched
+
+
+def _format_node_result_lines(node_id: str, meta: dict[str, Any]) -> list[str]:
+    if node_id == "gn_meeting":
+        gn = meta.get("gn_meeting_result")
+        if not isinstance(gn, dict):
+            return [_detail_line("状态", "已创建")]
+        return [
+            _detail_line("主题", str(gn.get("subject") or meta.get("task_title") or "—")),
+            _detail_line("会议链接", str(gn.get("meeting_link") or "—")),
+            _detail_line("会议密码", str(gn.get("meeting_password") or "—")),
+        ]
+
+    if node_id == "email":
+        em = meta.get("email_sent_result")
+        if not isinstance(em, dict):
+            return [_detail_line("状态", "已发送")]
+        return [
+            _detail_line("邮件标题", str(em.get("subject") or "—")),
+            _detail_line("发送时间", _format_datetime_display(str(em.get("sent_at") or ""))),
+            _detail_line("主要内容梗概", str(em.get("body_summary") or "—")),
+        ]
+
+    if node_id == "room":
+        room = meta.get("room_booking_result")
+        if not isinstance(room, dict):
+            return [_detail_line("状态", "已预约")]
+        return [
+            _detail_line("会议室", str(room.get("room_name") or "—")),
+            _detail_line("主题", str(room.get("subject") or "—")),
+            _detail_line("时间", f"{room.get('start_time') or '—'} — {room.get('end_time') or '—'}"),
+            _detail_line("参会人", str(room.get("attendees") or "—")),
+        ]
+
+    if node_id == "travel":
+        tr = meta.get("travel_apply_result")
+        if not isinstance(tr, dict):
+            return [_detail_line("状态", "已审批通过")]
+        return [
+            _detail_line("差旅单号", str(tr.get("receipt_id") or "—")),
+            _detail_line("开始时间", _format_date_display(str(tr.get("departure_date") or ""))),
+            _detail_line("结束时间", _format_date_display(str(tr.get("return_date") or ""))),
+        ]
+
+    if node_id == "booking":
+        tb = meta.get("transport_booking_result")
+        if not isinstance(tb, dict):
+            return [_detail_line("状态", "已预定")]
+        dep_date = _format_date_display(str(tb.get("departure_date") or ""))
+        dep_time = str(tb.get("departure_time") or "").strip()
+        depart_at = f"{dep_date} {dep_time}".strip() if dep_time and dep_time != "—" else dep_date
+        return [
+            _detail_line("交通方式", str(tb.get("transport_mode") or "—")),
+            _detail_line("出发地", str(tb.get("origin") or "—")),
+            _detail_line("目的地", str(tb.get("destination") or "—")),
+            _detail_line("班次", str(tb.get("flight_no") or "—")),
+            _detail_line("发车时间", depart_at),
+        ]
+
+    if node_id == "hotel":
+        hb = meta.get("hotel_booking_result")
+        if not isinstance(hb, dict):
+            return [_detail_line("状态", "已预定")]
+        amount = str(hb.get("amount") or "").strip()
+        amount_label = f"{amount} 元/晚" if amount and amount != "—" else "—"
+        return [
+            _detail_line("酒店名称", str(hb.get("hotel_name") or "—")),
+            _detail_line("房型", str(hb.get("room_type") or "—")),
+            _detail_line("单价", amount_label),
+            _detail_line("入住日期", _format_date_display(str(hb.get("check_in") or ""))),
+            _detail_line("离店日期", _format_date_display(str(hb.get("check_out") or ""))),
+        ]
+
+    if node_id == "workpackage":
+        wp = meta.get("workpackage_result")
+        if not isinstance(wp, dict):
+            return [_detail_line("状态", "已提交")]
+        return [
+            _detail_line("项目", str(wp.get("project") or "—")),
+            _detail_line("填报周期", str(wp.get("period") or "—")),
+            _detail_line("工时", f"{wp.get('hours') or '—'} 小时"),
+            _detail_line("工作内容", str(wp.get("content") or "—")),
+            _detail_line("回执单号", str(wp.get("receipt_id") or "—")),
+        ]
+
+    if node_id == "leave":
+        lv = meta.get("leave_result")
+        if not isinstance(lv, dict):
+            return [_detail_line("状态", "已审批通过")]
+        return [
+            _detail_line("请假类型", str(lv.get("leave_type") or "—")),
+            _detail_line("开始日期", str(lv.get("date_start") or "—")),
+            _detail_line("结束日期", str(lv.get("date_end") or "—")),
+            _detail_line("天数", str(lv.get("days") or "—")),
+            _detail_line("事由", str(lv.get("reason") or "—")),
+            _detail_line("回执单号", str(lv.get("receipt_id") or "—")),
+        ]
+
+    if node_id == "info_collect":
+        return [_detail_line("状态", "已发布")]
+
+    title = str(meta.get("task_title") or "—")
+    category = str(meta.get("category") or "")
+    return [
+        _detail_line("事项", title),
+        _detail_line("类型", category or "综合办事"),
+        _detail_line("状态", "已完成"),
+    ]
 
 
 async def build_next_node_guidance(
@@ -839,12 +1214,26 @@ async def build_next_node_guidance(
         lines.append("")
         lines.append("订酒店将在订车票完成后继续办理。")
 
+    next_node_meta: dict[str, Any] = {
+        "node_id": active_id,
+        "label": label,
+        "missing_slots": missing,
+    }
+    if active_id == "booking":
+        travel_plan = build_travel_plan(ctx.user_messages)
+        combined = merge_user_texts(
+            [
+                record.content.strip()
+                for record in ctx.user_messages
+                if getattr(record, "role", None) == "user" and record.content.strip()
+            ]
+        )
+        next_node_meta["origin"] = travel_plan.origin or ""
+        next_node_meta["destination"] = travel_plan.destination or ""
+        next_node_meta["transport_type"] = resolve_transport_booking_type(combined, travel_plan)
+
     metadata = {
-        "workflow_next_node": {
-            "node_id": active_id,
-            "label": label,
-            "missing_slots": missing,
-        },
+        "workflow_next_node": next_node_meta,
         "workflow_plan": plan,
     }
     return "\n".join(lines), metadata

@@ -234,11 +234,62 @@ export function nodeActivationPrompt(nodeId: string, label?: string | null): str
   return prompts[nodeId] ?? label ?? '开始办理'
 }
 
+function travelPlanMeta(msg: Message): { status?: string; email_only?: boolean } | null {
+  const raw = msg.metadata?.travel_plan_confirm as { status?: string; email_only?: boolean } | undefined
+  if (!raw || raw.email_only) return null
+  return raw
+}
+
+/** 消息是否包含该节点可编辑的待确认面板。 */
+export function messageHasPendingInteractivePanel(
+  msg: Message,
+  nodeId: string,
+): boolean {
+  const meta = msg.metadata ?? {}
+  switch (nodeId) {
+    case 'travel':
+      return travelPlanMeta(msg)?.status === 'pending'
+    case 'email':
+      return Boolean(
+        (meta.travel_plan_confirm as { email_only?: boolean; status?: string } | undefined)
+          ?.email_only
+        && (meta.travel_plan_confirm as { status?: string }).status === 'pending',
+      )
+    case 'room':
+      return Boolean(
+        (meta.meeting_plan_confirm as { status?: string } | undefined)?.status === 'pending'
+        || (meta.room_selection as { status?: string } | undefined)?.status === 'pending',
+      )
+    case 'booking':
+    case 'hotel':
+      return (meta.booking_selection as { status?: string } | undefined)?.status === 'pending'
+    case 'workpackage':
+      return Boolean(
+        (meta.workpackage_plan_confirm as { status?: string } | undefined)?.status === 'pending'
+        || (meta.workpackage_confirm as { status?: string } | undefined)?.status === 'pending',
+      )
+    case 'leave':
+      return (meta.leave_plan_confirm as { status?: string } | undefined)?.status === 'pending'
+    case 'info_collect':
+      return (meta.info_collect_plan_confirm as { status?: string } | undefined)?.status === 'pending'
+    case 'gn_meeting':
+      return (meta.meeting_plan_confirm as { status?: string } | undefined)?.status === 'pending'
+    default:
+      return false
+  }
+}
+
 /** 从后往前查找与办理节点相关的最新一条消息。 */
 export function findLatestMessageForNode(
   messages: Message[],
   node: WorkflowPlanNode,
 ): Message | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const msg = messages[index]
+    if (messageHasPendingInteractivePanel(msg, node.id)) {
+      return msg
+    }
+  }
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const msg = messages[index]
     if (messageMatchesWorkflowNode(msg, node.id, node.task_id)) {

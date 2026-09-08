@@ -14,7 +14,7 @@ import BusinessFormPanel from '@/components/chat/BusinessFormPanel.vue'
 import ConfirmDialog from '@/components/chat/ConfirmDialog.vue'
 import WorkflowPlanRail from '@/components/chat/WorkflowPlanRail.vue'
 import type { MessageSource, Session, WorkflowPlanNode } from '@/types'
-import { extractWorkflowPlan, findLatestMessageForNode, nodeActivationPrompt, workflowPlanVisible } from '@/utils/workflowPlan'
+import { extractWorkflowPlan, findLatestMessageForNode, messageHasPendingInteractivePanel, nodeActivationPrompt, workflowPlanVisible } from '@/utils/workflowPlan'
 
 const chat = useChatStore()
 const auth = useAuthStore()
@@ -137,15 +137,18 @@ function openSource(source: MessageSource) {
 
 async function focusWorkflowNode(node: WorkflowPlanNode) {
   const target = findLatestMessageForNode(chat.displayMessages, node)
-  if (target) {
-    const ok = await messageListRef.value?.scrollToMessage(target.id)
-    if (!ok) {
-      alert(`暂未找到「${node.label}」相关对话`)
-    }
-    return
+  if (target && messageHasPendingInteractivePanel(target, node.id)) {
+    const ok = await messageListRef.value?.scrollToMessage(target.id, 'smooth', {
+      highlightInteractive: true,
+    })
+    if (ok) return
   }
 
   if (node.status === 'completed') {
+    if (target) {
+      await messageListRef.value?.scrollToMessage(target.id)
+      return
+    }
     alert(`「${node.label}」已完成，暂未找到相关对话记录`)
     return
   }
@@ -178,6 +181,7 @@ async function focusWorkflowNode(node: WorkflowPlanNode) {
         v-if="showWorkflowRail && workflowPlan"
         :plan="workflowPlan"
         :expanded="workflowRailExpanded"
+        :messages="chat.messages"
         @toggle="toggleWorkflowRail"
         @focus-node="focusWorkflowNode"
       />

@@ -370,12 +370,14 @@ export const useChatStore = defineStore('chat', () => {
     flight_no?: string
     train_no?: string
     hotel_name?: string
+    drive?: boolean
   }) {
     await _confirmWorkflow(payload.messageId, 'booking_selection', () =>
       confirmBookingSelection(activeSessionId.value!, {
         flight_no: payload.flight_no,
         train_no: payload.train_no,
         hotel_name: payload.hotel_name,
+        drive: payload.drive,
       }),
     )
   }
@@ -469,14 +471,18 @@ export const useChatStore = defineStore('chat', () => {
     const emailCompose = meta.email_compose as EmailComposeMeta | undefined
     const taskId = (emailCompose?.task_id ?? meta.task_id) as string | undefined
     if (taskId && isEmailOnly) {
-      saveMailPrefill(taskId, emailCompose ?? {
-        task_id: taskId,
-        session_id: activeSessionId.value ?? undefined,
-        recipient: emailFields.recipient,
-        cc: emailFields.cc,
-        subject: emailFields.subject,
-        body: emailFields.body,
-        signature: emailFields.signature,
+      saveMailPrefill(taskId, {
+        ...(emailCompose ?? {
+          task_id: taskId,
+          session_id: activeSessionId.value ?? undefined,
+          recipient: emailFields.recipient,
+          cc: emailFields.cc,
+          subject: emailFields.subject,
+          body: emailFields.body,
+          signature: emailFields.signature,
+        }),
+        from_name: emailCompose?.from_name,
+        from_email: emailCompose?.from_email,
       })
       openMailCompose(taskId)
     }

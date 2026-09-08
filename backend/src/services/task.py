@@ -2,6 +2,8 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
+import re
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.task_catalog import build_task_summary, category_label, infer_category
@@ -165,6 +167,22 @@ def _build_completion_content(category: str, task_title: str, receipt_id: str | 
                 f"OA 审批已通过（{copy['chain']}）。预约详情见下方卡片。{receipt_line}",
             ]
         )
+    if category == "transport_book":
+        return "\n".join(
+            [
+                f"✅ **{task_title or copy['title']}已预定**",
+                "",
+                f"交通预订已完成，票务信息已同步至智能办公助手。{receipt_line}",
+            ]
+        )
+    if category == "hotel_book":
+        return "\n".join(
+            [
+                f"✅ **{task_title or copy['title']}已预定**",
+                "",
+                f"酒店预订已完成，入住信息已同步至智能办公助手。{receipt_line}",
+            ]
+        )
     return "\n".join(
         [
             f"✅ **{task_title or copy['title']}已完成**",
@@ -174,6 +192,117 @@ def _build_completion_content(category: str, task_title: str, receipt_id: str | 
             "您可在「我的任务」中查看详情，或继续在本对话中办理其他事项。",
         ]
     )
+
+
+def _field_str(fields: dict | None, key: str, default: str = "—") -> str:
+    value = (fields or {}).get(key)
+    text = str(value).strip() if value is not None else ""
+    return text or default
+
+
+def _infer_transport_mode(
+    steps: list[dict], form_fields: dict | None, result: dict | None
+) -> str:
+    fields = form_fields or {}
+    pref = _field_str(fields, "transport_mode")
+    if pref not in ("—", ""):
+        return pref
+
+    selected: dict = {}
+    if isinstance(result, dict):
+        raw_selected = result.get("selected")
+        if isinstance(raw_selected, dict):
+            selected = raw_selected
+        if selected.get("train_no") or result.get("train_no"):
+            return "高铁"
+        if selected.get("flight_no"):
+            return "机票"
+
+    ticket = _field_str(fields, "flight_no")
+    if ticket != "—":
+        if re.match(r"^[GDCZK]\d", ticket, re.I):
+            return "高铁"
+        return "机票"
+    return "—"
+
+
+def _extract_transport_booking_result(
+    steps: list[dict], form_fields: dict | None, receipt_id: str | None = None
+) -> dict[str, str]:
+    apply_step = next((s for s in steps if s.get("tool") == "flight_book"), None)
+    result = (apply_step or {}).get("result") or {}
+    fields = form_fields or {}
+    flight_no = _field_str(fields, "flight_no")
+    if flight_no == "—" and isinstance(result, dict):
+        flight_no = _field_str(result, "train_no")
+    return {
+        "transport_mode": _infer_transport_mode(steps, form_fields, result if isinstance(result, dict) else None),
+        "origin": _field_str(fields, "origin"),
+        "destination": _field_str(fields, "destination"),
+        "passenger_name": _field_str(fields, "passenger_name"),
+        "departure_date": _field_str(fields, "departure_date"),
+        "departure_time": _field_str(fields, "departure_time"),
+        "flight_no": flight_no,
+        "amount": _field_str(fields, "amount"),
+        "receipt_id": receipt_id or "—",
+    }
+
+
+def _extract_hotel_booking_result(
+    form_fields: dict | None, receipt_id: str | None = None
+) -> dict[str, str]:
+    fields = form_fields or {}
+    return {
+        "guest_name": _field_str(fields, "guest_name"),
+        "hotel_name": _field_str(fields, "hotel_name"),
+        "room_type": _field_str(fields, "room_type"),
+        "check_in": _field_str(fields, "check_in"),
+        "check_out": _field_str(fields, "check_out"),
+        "amount": _field_str(fields, "amount"),
+        "receipt_id": receipt_id or "—",
+    }
+
+
+def _extract_travel_apply_result(
+    form_fields: dict | None, receipt_id: str | None = None
+) -> dict[str, str]:
+    fields = form_fields or {}
+    return {
+        "destination": _field_str(fields, "destination"),
+        "departure_date": _field_str(fields, "departure_date"),
+        "return_date": _field_str(fields, "return_date"),
+        "project": _field_str(fields, "project"),
+        "transport": _field_str(fields, "transport"),
+        "description": _field_str(fields, "description"),
+        "receipt_id": receipt_id or "—",
+    }
+
+
+def _extract_workpackage_result(
+    form_fields: dict | None, receipt_id: str | None = None
+) -> dict[str, str]:
+    fields = form_fields or {}
+    return {
+        "project": _field_str(fields, "project"),
+        "period": _field_str(fields, "period"),
+        "hours": _field_str(fields, "hours"),
+        "content": _field_str(fields, "content"),
+        "receipt_id": receipt_id or "—",
+    }
+
+
+def _extract_leave_result(
+    form_fields: dict | None, receipt_id: str | None = None
+) -> dict[str, str]:
+    fields = form_fields or {}
+    return {
+        "leave_type": _field_str(fields, "leave_type"),
+        "date_start": _field_str(fields, "date_start"),
+        "date_end": _field_str(fields, "date_end"),
+        "days": _field_str(fields, "days"),
+        "reason": _field_str(fields, "reason"),
+        "receipt_id": receipt_id or "—",
+    }
 
 
 def _extract_room_booking_result(steps: list[dict], form_fields: dict | None) -> dict[str, str]:
@@ -196,6 +325,27 @@ def _extract_room_booking_result(steps: list[dict], form_fields: dict | None) ->
         "time_label": time_label or start_time,
         "attendees": str(fields.get("attendees") or "—"),
     }
+
+
+def _form_id_from_email_step(steps: list[dict]) -> str | None:
+    for step in steps:
+        if step.get("tool") == "email_notify":
+            return _form_id_from_step(step)
+    return None
+
+
+def _summarize_email_body(body: str | None, max_len: int = 96) -> str:
+    if not body:
+        return "—"
+    text = re.sub(r"\s+", " ", str(body).strip())
+    for marker in ("此致", "敬礼", "Best regards", "Regards", "顺祝"):
+        idx = text.find(marker)
+        if idx > 24:
+            text = text[:idx].strip()
+            break
+    if len(text) <= max_len:
+        return text or "—"
+    return text[: max_len - 1].rstrip() + "…"
 
 
 async def _build_completion_payload(
@@ -234,6 +384,27 @@ async def _build_completion_payload(
     elif category == "meeting":
         booking = _extract_room_booking_result(steps, form_fields)
         assistant_metadata["room_booking_result"] = booking
+    elif category == "transport_book":
+        assistant_metadata["transport_booking_result"] = _extract_transport_booking_result(
+            steps, form_fields, receipt_id
+        )
+    elif category == "hotel_book":
+        assistant_metadata["hotel_booking_result"] = _extract_hotel_booking_result(
+            form_fields, receipt_id
+        )
+    elif category == "travel":
+        assistant_metadata["travel_apply_result"] = _extract_travel_apply_result(
+            form_fields, receipt_id
+        )
+    elif category == "workpackage":
+        assistant_metadata["workpackage_result"] = _extract_workpackage_result(
+            form_fields, receipt_id
+        )
+    elif category == "leave":
+        assistant_metadata["leave_result"] = _extract_leave_result(form_fields, receipt_id)
+
+    if task_title:
+        assistant_metadata["task_title"] = task_title
 
     return completion_content, assistant_metadata
 
@@ -496,6 +667,17 @@ class TaskService:
                     "steps_desc": f"{steps_desc} · 已完成",
                 }
             )
+            for result_key in (
+                "hotel_booking_result",
+                "transport_booking_result",
+                "travel_apply_result",
+                "room_booking_result",
+                "gn_meeting_result",
+                "workpackage_result",
+                "leave_result",
+            ):
+                if assistant_metadata.get(result_key):
+                    meta[result_key] = assistant_metadata[result_key]
             await self.message_repo.update(task_message, metadata_json=meta)
 
         await _sync_related_task_cards(
@@ -567,6 +749,60 @@ class TaskService:
             )
         return await self.approve_oa_application(user_id, task_id)
 
+    async def create_transport_booking(
+        self, user_id: int, task_id: str
+    ) -> OaTaskActionPublic | None:
+        """交通预订：用户确认后直接预定，无需 OA 审批流程。"""
+        record = await self.task_repo.get_by_id(task_id, user_id)
+        if record is None or record.status == "cancelled":
+            return None
+        category = infer_category(record.steps_json or [])
+        if category != "transport_book":
+            return None
+        if record.status == "completed":
+            recent = await self.message_repo.list_recent_for_context(
+                record.session_id, limit=12
+            )
+            assistant_msg = None
+            for msg in reversed(recent):
+                meta = msg.metadata_json or {}
+                if meta.get("oa_completion") and meta.get("task_id") == task_id:
+                    assistant_msg = _to_message_public(msg).model_dump()
+                    break
+            return OaTaskActionPublic(
+                task=_to_task_public(record),
+                session_id=record.session_id,
+                assistant_message=assistant_msg,
+            )
+        return await self.approve_oa_application(user_id, task_id)
+
+    async def create_hotel_booking(
+        self, user_id: int, task_id: str
+    ) -> OaTaskActionPublic | None:
+        """酒店预订：用户确认后直接预定，无需 OA 审批流程。"""
+        record = await self.task_repo.get_by_id(task_id, user_id)
+        if record is None or record.status == "cancelled":
+            return None
+        category = infer_category(record.steps_json or [])
+        if category != "hotel_book":
+            return None
+        if record.status == "completed":
+            recent = await self.message_repo.list_recent_for_context(
+                record.session_id, limit=12
+            )
+            assistant_msg = None
+            for msg in reversed(recent):
+                meta = msg.metadata_json or {}
+                if meta.get("oa_completion") and meta.get("task_id") == task_id:
+                    assistant_msg = _to_message_public(msg).model_dump()
+                    break
+            return OaTaskActionPublic(
+                task=_to_task_public(record),
+                session_id=record.session_id,
+                assistant_message=assistant_msg,
+            )
+        return await self.approve_oa_application(user_id, task_id)
+
     async def confirm_email_sent(
         self,
         user_id: int,
@@ -575,6 +811,8 @@ class TaskService:
         recipient: str | None = None,
         subject: str | None = None,
         message_id: str | None = None,
+        body: str | None = None,
+        sent_at: str | None = None,
     ) -> OaTaskActionPublic | None:
         record = await self.task_repo.get_by_id(task_id, user_id)
         if record is None or record.status == "cancelled":
@@ -601,12 +839,22 @@ class TaskService:
             )
 
         now = datetime.now(UTC).isoformat()
+        sent_time = (sent_at or "").strip() or now
+        email_body = (body or "").strip()
+        if not email_body:
+            form_id = _form_id_from_email_step(steps)
+            if form_id:
+                form_record = await self.form_repo.get_by_id(form_id, user_id)
+                if form_record and form_record.fields_json:
+                    email_body = str(form_record.fields_json.get("body") or "").strip()
+
         sent_payload = {
             "email_sent": True,
-            "sent_at": now,
+            "sent_at": sent_time,
             "message_id": message_id,
             "recipient": recipient,
             "subject": subject,
+            "body": email_body,
         }
 
         for step in steps:
@@ -638,7 +886,13 @@ class TaskService:
             ]
         )
         assistant_metadata: dict[str, Any] = {
-            "email_sent_result": True,
+            "email_sent_result": {
+                "recipient": recipient_label,
+                "subject": subject_label,
+                "message_id": message_id,
+                "sent_at": sent_time,
+                "body_summary": _summarize_email_body(email_body),
+            },
             "task_id": record.id,
             "category": "email",
         }

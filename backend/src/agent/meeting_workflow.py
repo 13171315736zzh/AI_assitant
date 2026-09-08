@@ -16,6 +16,14 @@ _FLEXIBLE_ROOM = re.compile(
 )
 _EQUIPMENT_PREF = re.compile(r"投屏|投影")
 _GN_MEETING = re.compile(r"国能会|线上会议|视频会议")
+_CAPACITY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(\d+)\s*人\s*以上"),
+    re.compile(r"至少\s*(\d+)\s*人"),
+    re.compile(r"(\d+)\s*人以上的?(?:会议)?室"),
+    re.compile(r"容纳\s*(\d+)\s*人"),
+    re.compile(r"需要\s*(\d+)\s*人"),
+    re.compile(r"(\d+)\s*人(?:左右|规模)?(?:的?(?:会议|会议室))?"),
+)
 
 
 def _parse_room_code(text: str) -> str | None:
@@ -44,6 +52,7 @@ class MeetingPlan:
     start_hint: str | None = None
     end_hint: str | None = None
     attendees: str | None = None
+    min_capacity: int | None = None
     raw_goal: str = ""
     needs_gn_meeting: bool = False
     needs_room_booking: bool = False
@@ -237,6 +246,18 @@ def resolve_meeting_datetime(
     }
 
 
+def _parse_min_capacity(combined: str) -> int | None:
+    """从「20人以上」「至少20人」等表述提取最低容纳人数。"""
+    values: list[int] = []
+    for pattern in _CAPACITY_PATTERNS:
+        for match in pattern.finditer(combined):
+            try:
+                values.append(int(match.group(1)))
+            except (TypeError, ValueError):
+                continue
+    return max(values) if values else None
+
+
 def build_meeting_plan(messages) -> MeetingPlan:
     combined = merge_user_texts(
         [
@@ -296,6 +317,10 @@ def build_meeting_plan(messages) -> MeetingPlan:
     attendees = re.search(r"参会[人员]*[:：]?\s*([\u4e00-\u9fff、,，\s]{2,30})", combined)
     if attendees:
         plan.attendees = attendees.group(1).strip()
+
+    capacity = _parse_min_capacity(combined)
+    if capacity:
+        plan.min_capacity = capacity
 
     _apply_default_schedule(plan, combined)
     return plan
@@ -438,6 +463,8 @@ def meeting_plan_confirm_items(plan: MeetingPlan) -> list[dict[str, str]]:
     ]
     if plan.attendees:
         items.append(_plan_item("参会人员", plan.attendees))
+    if plan.min_capacity:
+        items.append(_plan_item("人数要求", f"{plan.min_capacity} 人以上"))
     return items
 
 
@@ -450,7 +477,7 @@ def is_meeting_plan_update(text: str) -> bool:
     if _ROOM_PATTERN.search(text):
         return True
     if re.search(
-        r"明天|后天|今天|今晚|周[一二三四五六日]|上午|下午|\d+\s*[点:：]|进度|评审|参会|投屏|投影",
+        r"明天|后天|今天|今晚|周[一二三四五六日]|上午|下午|\d+\s*[点:：]|进度|评审|参会|投屏|投影|\d+\s*人",
         text,
     ):
         return True
@@ -471,6 +498,8 @@ def build_meeting_plan_confirm_items(plan: MeetingPlan) -> list[dict[str, str]]:
             {"label": "参会人员", "value": plan.attendees or "待定"},
         ]
     )
+    if plan.min_capacity:
+        items.append({"label": "人数要求", "value": f"{plan.min_capacity} 人以上"})
     return items
 
 
@@ -557,8 +586,17 @@ def build_meeting_plan_confirm_metadata(plan: MeetingPlan) -> dict:
         "time_hint": "可直接修改日期、开始与结束时间",
     }
     if plan.needs_room_booking:
-        meta["room_options"] = list_room_presets()
-        meta["room_hint"] = "点选备选会议室、灵活选择，或在输入框填写会议室名称"
+        presets = list_room_presets()
+        if plan.min_capacity:
+            presets = [room for room in presets if int(room.get("capacity") or 0) >= plan.min_capacity]
+        meta["room_options"] = presets
+        meta["room_hint"] = (
+            f"已按 {plan.min_capacity} 人以上筛选；点选备选会议室、灵活选择，或在输入框填写会议室名称"
+            if plan.min_capacity
+            else "点选备选会议室、灵活选择，或在输入框填写会议室名称"
+        )
+        if plan.min_capacity:
+            meta["min_capacity"] = plan.min_capacity
     return {
         "interactive": True,
         "meeting_plan_confirm": meta,
@@ -605,22 +643,48 @@ def build_room_selection_content(plan: MeetingPlan, availability: dict) -> str:
     room = plan.room or availability.get("requested_room", "")
     time_label = availability.get("time_label", "")
     reason = availability.get("conflict_reason") or ""
+    options = availability.get("alternatives") or []
+    capacity_line = ""
+    if plan.min_capacity:
+        capacity_line = f"已按 **{plan.min_capacity} 人以上** 筛选可用会议室。"
     if plan.room_flexible or availability.get("browse_mode"):
         equip = plan.equipment_pref or "投屏"
         lines = [
             f"已查询会议系统 **{time_label}** 时段可用会议室（需 **{equip}**）。",
-            "",
-            "下方列出符合条件的备选会议室，请直接点选后确认预约。",
         ]
+        if capacity_line:
+            lines.append(capacity_line)
+        if not options:
+            lines.extend(
+                [
+                    "",
+                    f"当前时段暂无满足 **{plan.min_capacity} 人以上** 要求的会议室，请调整人数或更换时段后重试。",
+                ]
+            )
+            return "\n".join(lines)
+        lines.extend(
+            [
+                "",
+                "下方列出符合条件的备选会议室，请直接点选后确认预约。",
+            ]
+        )
         return "\n".join(lines)
 
     lines = [
         f"已查询 **{room} 会议室** {time_label} 的预订情况。",
-        "",
-        reason,
-        "",
-        "该时段暂不可用。下方为您推荐了同时段可用的会议室，请选择后确认预约。",
     ]
+    if capacity_line:
+        lines.append(capacity_line)
+    lines.extend(
+        [
+            "",
+            reason,
+            "",
+            "该时段暂不可用。下方为您推荐了同时段可用的会议室，请选择后确认预约。"
+            if options
+            else f"该时段暂无满足 **{plan.min_capacity} 人以上** 要求的替代会议室，请调整人数或更换时段。",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -636,6 +700,7 @@ def build_room_selection_metadata(plan: MeetingPlan, availability: dict) -> dict
             "end_time": availability.get("end_time", ""),
             "conflict_reason": availability.get("conflict_reason"),
             "equipment_pref": plan.equipment_pref,
+            "min_capacity": plan.min_capacity,
             "browse_mode": bool(plan.room_flexible or availability.get("browse_mode")),
             "options": availability.get("alternatives") or [],
             "needs_gn_meeting": plan.needs_gn_meeting,

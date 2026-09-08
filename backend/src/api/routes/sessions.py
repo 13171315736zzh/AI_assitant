@@ -211,6 +211,7 @@ async def confirm_booking_selection(
         body.flight_no,
         body.train_no,
         body.hotel_name,
+        body.drive,
     )
     if result is None:
         return JSONResponse(

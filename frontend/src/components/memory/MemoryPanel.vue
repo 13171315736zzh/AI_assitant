@@ -9,6 +9,7 @@ import {
 import { TRAVEL_MODE_PREFERENCE_OPTIONS } from '@/constants/travelModePreference'
 import { filterExtensionMemoryItems } from '@/constants/coreMemoryFields'
 import type { MemoryItem, MemoryStructured } from '@/services/settingsService'
+import { invalidateMemoryProfileCache } from '@/composables/useMemoryProfile'
 import { clearUserMemory, fetchMemory, updateMemory } from '@/services/settingsService'
 
 const memoryEnabled = ref(true)
@@ -127,6 +128,7 @@ async function save() {
       ),
     })
     if (res.code === 200) {
+      invalidateMemoryProfileCache()
       memoryEnabled.value = res.data.memory_enabled
       structured.value = {
         ...emptyStructured(),
@@ -153,6 +155,7 @@ async function handleClearMemory() {
   try {
     const res = await clearUserMemory()
     if (res.code === 200) {
+      invalidateMemoryProfileCache()
       alert('长期记忆已清除')
       await load()
     } else {

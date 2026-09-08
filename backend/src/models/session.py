@@ -45,6 +45,7 @@ class BookingSelectionConfirm(BaseModel):
     flight_no: str | None = None
     train_no: str | None = None
     hotel_name: str | None = None
+    drive: bool = False
 
 
 class RoomSelectionConfirm(BaseModel):

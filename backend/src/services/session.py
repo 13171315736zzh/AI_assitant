@@ -179,7 +179,20 @@ class SessionService:
         *,
         card_draft: dict | None = None,
     ) -> tuple[str, str, dict | None]:
-        from src.agent.workflow_plan import prepare_workflow_route
+        from src.agent.workflow_plan import prepare_workflow_route, try_session_summary_reply
+
+        summary_reply = await try_session_summary_reply(
+            self.message_repo, session_id, content
+        )
+        if summary_reply:
+            return await self.agent_service.finalize_outgoing(
+                session_id,
+                content,
+                summary_reply[0],
+                summary_reply[1],
+                summary_reply[2],
+                confirmed_position,
+            )
 
         db = self.session_repo.db
         preferred_service = await prepare_workflow_route(
@@ -316,6 +329,7 @@ class SessionService:
         flight_no: str | None,
         train_no: str | None,
         hotel_name: str | None,
+        drive: bool = False,
     ) -> tuple[MessagePublic, MessagePublic, str] | None | str:
         record = await self._prepare_send(user_id, session_id)
         if record is None:
@@ -333,13 +347,16 @@ class SessionService:
             flight_no=flight_no,
             train_no=train_no,
             hotel_name=hotel_name,
+            drive=drive,
             staff_level=travel_staff_level,
         )
         if not workflow:
             return None
 
         summary_parts = ["已确认预订方案"]
-        if train_no:
+        if drive:
+            summary_parts.append("自驾")
+        elif train_no:
             summary_parts.append(f"车次 {train_no}")
         elif flight_no:
             summary_parts.append(f"航班 {flight_no}")

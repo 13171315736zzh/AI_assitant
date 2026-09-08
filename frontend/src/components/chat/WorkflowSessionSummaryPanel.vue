@@ -75,7 +75,7 @@ async function copySummary() {
   white-space: pre-wrap;
   word-break: break-word;
   color: #334155;
-  max-height: 320px;
+  max-height: 480px;
   overflow: auto;
 }
 </style>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useMemoryProfile } from '@/composables/useMemoryProfile'
 import { useAuthStore } from '@/stores/useAuthStore'
 import { fetchTask, submitEmailSent } from '@/services/taskService'
 import { buildOaNotifyPayload, notifyAssistantOaUpdate } from '@/utils/oaDemo'
@@ -20,6 +21,7 @@ import {
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const memory = useMemoryProfile()
 
 const loading = ref(true)
 const error = ref<string | null>(null)
@@ -37,11 +39,10 @@ const subject = ref('')
 const body = ref('')
 const signature = ref('')
 
-const fromName = computed(() => auth.user?.display_name ?? '用户')
-const fromEmail = computed(() => {
-  const name = (auth.user?.display_name ?? 'user').toLowerCase()
-  return `${name}@ceic.com`
-})
+const fromName = computed(() =>
+  memory.resolveDisplayName(auth.user?.display_name, '用户'),
+)
+const fromEmail = computed(() => memory.email.value)
 
 function showToast(message: string) {
   toast.value = message
@@ -76,6 +77,7 @@ async function load() {
   loading.value = true
   error.value = null
   try {
+    await memory.reload()
     const prefill = loadMailPrefill(taskId.value)
     const draft = loadMailDraft(taskId.value)
     if (prefill) {
@@ -170,6 +172,8 @@ async function handleSend() {
       recipient: fields.recipient,
       subject: fields.subject,
       message_id: messageId,
+      body: record.body,
+      sent_at: record.sent_at,
     })
     if (res.code !== 200) {
       showToast(res.message || '同步发送状态失败')
@@ -232,7 +236,8 @@ onMounted(load)
       </div>
       <div class="topbar-user">
         <span>{{ fromName }}</span>
-        <span class="email">{{ fromEmail }}</span>
+        <span v-if="fromEmail" class="email">{{ fromEmail }}</span>
+        <span v-else class="email muted">请在长期记忆中填写邮箱</span>
       </div>
     </header>
 
@@ -352,6 +357,11 @@ onMounted(load)
 .email {
   opacity: 0.85;
   font-size: 12px;
+}
+
+.email.muted {
+  opacity: 0.65;
+  font-style: italic;
 }
 
 .mail-nav {

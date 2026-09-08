@@ -9,6 +9,8 @@ export interface EmailComposeFields {
   subject: string
   body: string
   signature: string
+  from_name?: string
+  from_email?: string
 }
 
 export interface SentMailRecord extends EmailComposeFields {

@@ -169,11 +169,14 @@ def _collect_alternatives(
     start: str,
     end: str,
     equipment_pref: str | None = None,
+    min_capacity: int | None = None,
     limit: int = 3,
 ) -> list[RoomOption]:
     alternatives: list[RoomOption] = []
     for alt_room, (floor, cap, equip) in _ROOM_CATALOG.items():
         if alt_room == exclude_room:
+            continue
+        if min_capacity and cap < min_capacity:
             continue
         if not _match_equipment(equip, equipment_pref):
             continue
@@ -188,7 +191,10 @@ def _collect_alternatives(
                 available=True,
             )
         )
-    alternatives.sort(key=lambda r: (0 if r.room == "235" else 1, r.room))
+    if min_capacity:
+        alternatives.sort(key=lambda r: (r.capacity, r.room))
+    else:
+        alternatives.sort(key=lambda r: (0 if r.room == "235" else 1, r.room))
     return alternatives[:limit]
 
 

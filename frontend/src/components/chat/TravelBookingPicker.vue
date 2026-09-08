@@ -8,11 +8,19 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  confirm: [payload: { flight_no?: string; train_no?: string; hotel_name?: string }]
+  confirm: [payload: { flight_no?: string; train_no?: string; hotel_name?: string; drive?: boolean }]
 }>()
 
-const transportType = computed(() => props.selection.transport_type ?? 'flight')
-const isTrainMode = computed(() => transportType.value === 'train')
+type TransportMode = 'flight' | 'train' | 'drive'
+
+const transportMode = ref<TransportMode>(
+  (props.selection.transport_type as TransportMode) ?? 'flight',
+)
+
+const isPending = computed(() => props.selection.status === 'pending')
+const leg = computed(() => props.selection.leg ?? 'outbound')
+const legLabel = computed(() => (leg.value === 'return' ? '返程' : '去程'))
+const needsReturn = computed(() => Boolean(props.selection.needs_return))
 
 const selectedFlightNo = ref<string | null>(
   props.selection.flights[0]?.flight_no ?? null,
@@ -24,11 +32,40 @@ const selectedHotelName = ref<string | null>(
   props.selection.needs_flight ? null : (props.selection.hotels[0]?.name ?? null),
 )
 
-const isPending = computed(() => props.selection.status === 'pending')
+const routeOrigin = computed(() =>
+  props.selection.origin?.trim()
+  || props.selection.trains?.[0]?.origin?.trim()
+  || props.selection.flights?.[0]?.origin?.trim()
+  || '',
+)
 
-const hasTransportSelected = computed(() => (
-  isTrainMode.value ? Boolean(selectedTrainNo.value) : Boolean(selectedFlightNo.value)
-))
+const routeDestination = computed(() =>
+  props.selection.destination?.trim()
+  || props.selection.trains?.[0]?.destination?.trim()
+  || props.selection.flights?.[0]?.destination?.trim()
+  || '',
+)
+
+const isTransportBooking = computed(
+  () => props.selection.needs_flight && props.selection.booking_kind === 'transport',
+)
+
+const isDriveMode = computed(() => transportMode.value === 'drive')
+const isTrainMode = computed(() => transportMode.value === 'train')
+const isFlightMode = computed(() => transportMode.value === 'flight')
+
+const showPickerBanner = computed(() => {
+  if (isTransportBooking.value && isDriveMode.value) return false
+  if (isTrainMode.value && isTransportBooking.value && !props.selection.needs_hotel) {
+    return false
+  }
+  return true
+})
+
+const hasTransportSelected = computed(() => {
+  if (isDriveMode.value) return true
+  return isTrainMode.value ? Boolean(selectedTrainNo.value) : Boolean(selectedFlightNo.value)
+})
 
 const hotelSelectionEnabled = computed(() => {
   if (!props.selection.needs_hotel) return false
@@ -38,13 +75,20 @@ const hotelSelectionEnabled = computed(() => {
 
 const canSubmit = computed(() => {
   if (!isPending.value || props.submitting) return false
-  if (props.selection.needs_flight) {
+  if (props.selection.needs_flight && isTransportBooking.value) {
+    if (isDriveMode.value) return true
     if (isTrainMode.value && !selectedTrainNo.value) return false
-    if (!isTrainMode.value && !selectedFlightNo.value) return false
+    if (isFlightMode.value && !selectedFlightNo.value) return false
   }
   if (props.selection.needs_hotel && !selectedHotelName.value) return false
   return true
 })
+
+const transportModeOptions: { value: TransportMode; label: string }[] = [
+  { value: 'flight', label: '飞机' },
+  { value: 'train', label: '火车' },
+  { value: 'drive', label: '自驾' },
+]
 
 function selectFlight(flight: FlightOption) {
   if (!isPending.value) return
@@ -64,18 +108,19 @@ function selectHotel(hotel: HotelOption) {
 function handleConfirm() {
   if (!canSubmit.value) return
   emit('confirm', {
-    flight_no: !isTrainMode.value && props.selection.needs_flight
+    flight_no: isFlightMode.value && props.selection.needs_flight
       ? selectedFlightNo.value ?? undefined
       : undefined,
     train_no: isTrainMode.value && props.selection.needs_flight
       ? selectedTrainNo.value ?? undefined
       : undefined,
     hotel_name: props.selection.needs_hotel ? selectedHotelName.value ?? undefined : undefined,
+    drive: isDriveMode.value && isTransportBooking.value ? true : undefined,
   })
 }
 
 watch(selectedFlightNo, (flightNo) => {
-  if (props.selection.needs_flight && props.selection.needs_hotel && !flightNo && !isTrainMode.value) {
+  if (props.selection.needs_flight && props.selection.needs_hotel && !flightNo && isFlightMode.value) {
     selectedHotelName.value = null
   }
 })
@@ -86,6 +131,15 @@ watch(selectedTrainNo, (trainNo) => {
   }
 })
 
+watch(
+  () => props.selection.transport_type,
+  (mode) => {
+    if (mode === 'flight' || mode === 'train' || mode === 'drive') {
+      transportMode.value = mode
+    }
+  },
+)
+
 function formatTime(value: string): string {
   const parts = value.split(' ')
   return parts.length > 1 ? parts.slice(1).join(' ') : value
@@ -94,23 +148,72 @@ function formatTime(value: string): string {
 
 <template>
   <div class="booking-picker" :class="{ confirmed: !isPending }">
-    <div class="picker-banner">
+    <div v-if="isTransportBooking" class="leg-card">
+      <div class="leg-head">
+        <span class="leg-badge">{{ legLabel }}</span>
+        <span v-if="needsReturn" class="leg-step">
+          {{ leg === 'outbound' ? '第 1 段 · 共 2 段' : '第 2 段 · 共 2 段' }}
+        </span>
+      </div>
+      <div class="route-row">
+        <span class="route-label">路线</span>
+        <span class="route-value">{{ routeOrigin }} → {{ routeDestination }}</span>
+      </div>
+      <div v-if="selection.departure_date" class="route-date">
+        出发日期 {{ selection.departure_date }}
+      </div>
+      <div class="mode-row">
+        <label class="mode-label" for="transport-mode">交通方式</label>
+        <select
+          id="transport-mode"
+          v-model="transportMode"
+          class="mode-select"
+          :disabled="!isPending || submitting"
+        >
+          <option
+            v-for="opt in transportModeOptions"
+            :key="opt.value"
+            :value="opt.value"
+          >
+            {{ opt.label }}
+          </option>
+        </select>
+      </div>
+    </div>
+
+    <div
+      v-if="showPickerBanner"
+      class="picker-banner"
+    >
       <span class="picker-banner-icon" aria-hidden="true">☑</span>
       <span v-if="selection.needs_flight && selection.needs_hotel">
-        请先选择{{ isTrainMode ? '车次' : '航班' }}，再选择酒店
+        请先选择{{ isTrainMode ? '车次' : isFlightMode ? '航班' : '交通' }}，再选择酒店
       </span>
-      <span v-else-if="selection.needs_flight">
-        请选择{{ isTrainMode ? '火车/高铁车次' : '航班' }}
+      <span v-else-if="selection.needs_flight && isTransportBooking">
+        请选择{{ isTrainMode ? '火车/高铁车次' : isFlightMode ? '航班' : '交通方式' }}
       </span>
       <span v-else-if="selection.needs_hotel">请选择酒店</span>
       <span v-else>请直接点击勾选 · 完成选择后确认预订</span>
     </div>
 
     <section
+      v-if="isTransportBooking && isDriveMode"
+      class="picker-section drive-section"
+    >
+      <div class="drive-card">
+        <strong>自驾出行</strong>
+        <p class="drive-desc">
+          {{ legLabel }}从 {{ routeOrigin || '出发地' }} 至 {{ routeDestination || '目的地' }}，
+          无需预订机票/车票，确认后将记录本段行程。
+        </p>
+      </div>
+    </section>
+
+    <section
       v-if="selection.needs_flight && isTrainMode && (selection.trains?.length ?? 0) > 0"
       class="picker-section"
     >
-      <h4 class="section-title">火车/高铁选项（{{ selection.trains?.length }} 个备选）</h4>
+      <h4 class="section-title">{{ legLabel }} · 火车/高铁（{{ selection.trains?.length }} 个备选）</h4>
       <div class="option-list">
         <label
           v-for="(train, idx) in selection.trains"
@@ -150,10 +253,10 @@ function formatTime(value: string): string {
     </section>
 
     <section
-      v-if="selection.needs_flight && !isTrainMode && selection.flights.length"
+      v-if="selection.needs_flight && isFlightMode && selection.flights.length"
       class="picker-section"
     >
-      <h4 class="section-title">航班选项（{{ selection.flights.length }} 个备选）</h4>
+      <h4 class="section-title">{{ legLabel }} · 航班（{{ selection.flights.length }} 个备选）</h4>
       <div class="option-list">
         <label
           v-for="(flight, idx) in selection.flights"
@@ -249,7 +352,7 @@ function formatTime(value: string): string {
         :disabled="!canSubmit"
         @click="handleConfirm"
       >
-        {{ submitting ? '提交中…' : '确认预订' }}
+        {{ submitting ? '提交中…' : leg === 'return' ? '确认返程预订' : needsReturn ? '确认去程，继续选返程' : '确认预订' }}
       </button>
     </div>
     <p v-else class="confirmed-hint">方案已确认，正在按所选内容继续办理。</p>
@@ -270,6 +373,112 @@ function formatTime(value: string): string {
   opacity: 0.88;
   border-color: var(--border);
   box-shadow: none;
+}
+
+.leg-card {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid #bfdbfe;
+  border-left: 4px solid #2563eb;
+  border-radius: var(--radius-sm);
+  background: #eff6ff;
+}
+
+.leg-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.leg-badge {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1d4ed8;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #dbeafe;
+}
+
+.leg-step {
+  font-size: 11px;
+  color: #475569;
+}
+
+.route-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.route-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1d4ed8;
+}
+
+.route-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1e3a8a;
+}
+
+.route-date {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #334155;
+}
+
+.mode-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.mode-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1d4ed8;
+  white-space: nowrap;
+}
+
+.mode-select {
+  flex: 1;
+  max-width: 160px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid #93c5fd;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 13px;
+  color: #1e3a8a;
+}
+
+.drive-section {
+  margin-top: 0;
+}
+
+.drive-card {
+  padding: 12px;
+  border: 1px dashed #93c5fd;
+  border-radius: var(--radius-sm);
+  background: #fff;
+}
+
+.drive-card strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: #1e3a8a;
+}
+
+.drive-desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #475569;
 }
 
 .picker-banner {

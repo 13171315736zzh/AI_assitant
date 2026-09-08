@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import type { WorkflowPlan, WorkflowPlanNode } from '@/types'
+import { computed, ref } from 'vue'
+import type { Message, WorkflowPlan, WorkflowPlanNode } from '@/types'
+import { buildWorkflowProgressSummary } from '@/utils/workflowProgressSummary'
 import { nodeStatusLabel } from '@/utils/workflowPlan'
 
 const props = defineProps<{
   plan: WorkflowPlan
   expanded: boolean
+  messages: Message[]
 }>()
 
 const emit = defineEmits<{
@@ -17,15 +19,56 @@ const completedCount = computed(
   () => props.plan.nodes.filter((node) => node.status === 'completed').length,
 )
 
+const copied = ref(false)
+
+const hasStartedNodes = computed(
+  () => props.plan.nodes.some((node) => node.status !== 'pending'),
+)
+
+async function copyProgressSummary() {
+  if (!hasStartedNodes.value) return
+  const text = buildWorkflowProgressSummary(props.plan, props.messages)
+  try {
+    await navigator.clipboard.writeText(text)
+    copied.value = true
+    window.setTimeout(() => {
+      copied.value = false
+    }, 2000)
+  } catch {
+    window.alert('复制失败，请稍后重试')
+  }
+}
+
 function nodeDisplayLabel(node: WorkflowPlanNode): string {
   if (node.id === 'gn_meeting') return '国能会'
   return node.label
 }
 
+function bookingVisualStatus(node: WorkflowPlanNode): string {
+  if (node.id !== 'booking') return node.status
+  const progress = node.booking_progress
+  if (!progress) return node.status
+  if (
+    progress.outbound === 'completed'
+    && progress.needs_return
+    && progress.return !== 'completed'
+  ) {
+    return 'partial'
+  }
+  if (
+    progress.outbound === 'completed'
+    && (!progress.needs_return || progress.return === 'completed')
+  ) {
+    return 'completed'
+  }
+  return node.status
+}
+
 function nodeClass(node: WorkflowPlanNode) {
+  const visual = bookingVisualStatus(node)
   return [
     'plan-node',
-    node.status,
+    visual,
     { active: props.plan.active_node_id === node.id && node.status === 'running' },
   ]
 }
@@ -40,7 +83,7 @@ function handleNodeClick(node: WorkflowPlanNode) {
     <aside class="workflow-rail" :class="{ collapsed: !expanded }">
       <template v-if="expanded">
         <header class="rail-head">
-          <strong>办理节点</strong>
+          <strong class="rail-title">办理节点</strong>
           <span class="rail-progress">{{ completedCount }}/{{ plan.nodes.length }}</span>
         </header>
 
@@ -63,6 +106,19 @@ function handleNodeClick(node: WorkflowPlanNode) {
           </div>
         </div>
 
+        <div class="rail-copy-wrap">
+          <button
+            type="button"
+            class="btn-copy-progress"
+            :class="{ copied }"
+            :disabled="!hasStartedNodes"
+            :title="hasStartedNodes ? '复制已开始节点的状态与关键信息' : '暂无已开始节点'"
+            @click="copyProgressSummary"
+          >
+            {{ copied ? '已复制' : '复制' }}
+          </button>
+        </div>
+
         <footer class="rail-legend">
           <span><i class="dot running" />进行中</span>
           <span><i class="dot submitted" />审批中</span>
@@ -80,17 +136,28 @@ function handleNodeClick(node: WorkflowPlanNode) {
         </button>
       </template>
 
-      <button
-        v-else
-        type="button"
-        class="rail-expand-btn"
-        title="展开办理节点"
-        @click="emit('toggle')"
-      >
-        <strong>办理节点</strong>
-        <span class="rail-progress">{{ completedCount }}/{{ plan.nodes.length }}</span>
-        <span class="chevron" aria-hidden="true">▼</span>
-      </button>
+      <div v-else class="rail-collapsed-wrap">
+        <button
+          type="button"
+          class="rail-expand-btn"
+          title="展开办理节点"
+          @click="emit('toggle')"
+        >
+          <strong>办理节点</strong>
+          <span class="rail-progress">{{ completedCount }}/{{ plan.nodes.length }}</span>
+          <span class="chevron" aria-hidden="true">▼</span>
+        </button>
+        <button
+          type="button"
+          class="btn-copy-progress collapsed-copy"
+          :class="{ copied }"
+          :disabled="!hasStartedNodes"
+          title="复制已开始节点的状态与关键信息"
+          @click="copyProgressSummary"
+        >
+          {{ copied ? '已复制' : '复制进度' }}
+        </button>
+      </div>
     </aside>
   </div>
 </template>
@@ -122,13 +189,69 @@ function handleNodeClick(node: WorkflowPlanNode) {
 .rail-head {
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 4px;
   padding: 12px 10px 0;
   font-size: 12px;
+  text-align: center;
 }
 
-.rail-head strong {
+.rail-title {
+  display: block;
+  width: 100%;
   color: var(--text);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.btn-copy-progress {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--primary);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--primary);
+  font-size: 10px;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.btn-copy-progress:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--primary) 8%, #fff);
+}
+
+.btn-copy-progress:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  border-color: #cbd5e1;
+  color: #94a3b8;
+}
+
+.btn-copy-progress.copied {
+  border-color: #22c55e;
+  color: #15803d;
+  background: #f0fdf4;
+}
+
+.btn-copy-progress.collapsed-copy {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 0 8px 8px;
+  padding: 4px 6px;
+  font-size: 10px;
+}
+
+.rail-copy-wrap {
+  margin: 12px 10px 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.rail-collapsed-wrap {
+  display: flex;
+  flex-direction: column;
 }
 
 .rail-progress {
@@ -205,7 +328,8 @@ function handleNodeClick(node: WorkflowPlanNode) {
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 12%, transparent);
 }
 
-.plan-node.submitted {
+.plan-node.submitted,
+.plan-node.partial {
   border-color: #f59e0b;
   background: #fef3c7;
   color: #b45309;
@@ -221,9 +345,8 @@ function handleNodeClick(node: WorkflowPlanNode) {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin: 14px 10px 0;
-  padding: 10px 0 0;
-  border-top: 1px solid var(--border);
+  margin: 10px 10px 0;
+  padding: 0;
   font-size: 10px;
   color: var(--text-secondary);
 }

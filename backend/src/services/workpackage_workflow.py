@@ -52,6 +52,7 @@ from src.repositories.project_mapping import ProjectMappingRepository
 from src.repositories.session import MessageRepository
 from src.repositories.task import TaskRepository
 from src.repositories.user import UserRepository
+from src.services.settings import SettingsService
 from src.repositories.user_settings import UserSettingsRepository
 from src.services.form import FormService
 from src.services.project_mapping import ProjectMappingService
@@ -101,7 +102,8 @@ class WorkpackageWorkflowService:
 
         settings = await self.settings_repo.get_by_user_id(user_id)
         if settings:
-            structured = settings.structured_json or {}
+            settings_svc = SettingsService(self.settings_repo, self.user_repo)
+            structured = await settings_svc.get_user_structured_memory(user_id)
             for project in structured.get("related_projects") or []:
                 name = str(project).strip()
                 if name and name not in seen:

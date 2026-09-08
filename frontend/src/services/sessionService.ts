@@ -199,7 +199,7 @@ export async function sendMessageStream(
 
 export async function confirmBookingSelection(
   sessionId: string,
-  payload: { flight_no?: string; train_no?: string; hotel_name?: string },
+  payload: { flight_no?: string; train_no?: string; hotel_name?: string; drive?: boolean },
 ): Promise<
   ApiResponse<{
     user_message: Message

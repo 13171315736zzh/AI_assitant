@@ -214,3 +214,31 @@ export function isGnMeetingPrimaryButtonDisabled(phase: OaPhase, submitting: boo
   if (submitting) return true
   return phase === 'approved'
 }
+
+export function transportBookingStatusBadge(phase: OaPhase): { label: string; class: string } {
+  return bookingStatusBadge(phase)
+}
+
+export function transportBookingPrimaryButtonLabel(phase: OaPhase, submitting: boolean): string {
+  return bookingPrimaryButtonLabel(phase, submitting)
+}
+
+export function isTransportBookingPrimaryButtonDisabled(phase: OaPhase, submitting: boolean): boolean {
+  return isBookingPrimaryButtonDisabled(phase, submitting)
+}
+
+export function bookingStatusBadge(phase: OaPhase): { label: string; class: string } {
+  if (phase === 'approved') return { label: '已预定', class: 'approved' }
+  return { label: '待预定', class: 'draft' }
+}
+
+export function bookingPrimaryButtonLabel(phase: OaPhase, submitting: boolean): string {
+  if (submitting) return '处理中…'
+  if (phase === 'approved') return '已预定'
+  return '预定'
+}
+
+export function isBookingPrimaryButtonDisabled(phase: OaPhase, submitting: boolean): boolean {
+  if (submitting) return true
+  return phase === 'approved'
+}

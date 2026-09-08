@@ -38,6 +38,11 @@ watch(
 
 const isPending = computed(() => props.confirm.status === 'pending')
 
+const canConfirm = computed(() => {
+  if (!isPending.value || props.submitting) return false
+  return Boolean(recipient.value.trim() && subject.value.trim() && body.value.trim())
+})
+
 function buildDraftPayload() {
   return {
     recipient: recipient.value.trim(),
@@ -56,7 +61,7 @@ function syncDraft() {
 watch([recipient, cc, subject, body, signature], syncDraft, { deep: true, immediate: true })
 
 function handleConfirm() {
-  if (!isPending.value || props.submitting) return
+  if (!canConfirm.value) return
   emit('confirm', buildDraftPayload())
 }
 </script>
@@ -65,10 +70,10 @@ function handleConfirm() {
   <div class="plan-confirm" :class="{ confirmed: !isPending }">
     <h4 class="section-title">{{ confirm.title }}</h4>
 
-    <div v-if="isPending" class="fields">
-      <div class="field-row">
-        <span class="field-key">收件人</span>
-        <div class="field-col">
+    <dl v-if="isPending" class="info-list">
+      <div class="info-row">
+        <dt>收件人</dt>
+        <dd>
           <input
             v-model="recipient"
             type="text"
@@ -76,12 +81,12 @@ function handleConfirm() {
             placeholder="姓名或邮箱"
             :disabled="submitting"
           />
-        </div>
+        </dd>
       </div>
 
-      <div class="field-row">
-        <span class="field-key">抄送人</span>
-        <div class="field-col">
+      <div class="info-row">
+        <dt>抄送人</dt>
+        <dd>
           <input
             v-model="cc"
             type="text"
@@ -89,12 +94,12 @@ function handleConfirm() {
             placeholder="可选，多人用顿号/逗号分隔"
             :disabled="submitting"
           />
-        </div>
+        </dd>
       </div>
 
-      <div class="field-row">
-        <span class="field-key">标题</span>
-        <div class="field-col">
+      <div class="info-row">
+        <dt>标题</dt>
+        <dd>
           <input
             v-model="subject"
             type="text"
@@ -102,12 +107,12 @@ function handleConfirm() {
             placeholder="邮件标题"
             :disabled="submitting"
           />
-        </div>
+        </dd>
       </div>
 
-      <div class="field-row field-row-top">
-        <span class="field-key">正文</span>
-        <div class="field-col">
+      <div class="info-row info-row-top">
+        <dt>正文</dt>
+        <dd>
           <textarea
             v-model="body"
             class="field-textarea"
@@ -115,12 +120,12 @@ function handleConfirm() {
             placeholder="邮件正文内容"
             :disabled="submitting"
           />
-        </div>
+        </dd>
       </div>
 
-      <div class="field-row">
-        <span class="field-key">落款</span>
-        <div class="field-col">
+      <div class="info-row">
+        <dt>落款</dt>
+        <dd>
           <input
             v-model="signature"
             type="text"
@@ -128,9 +133,9 @@ function handleConfirm() {
             placeholder="部门姓名"
             :disabled="submitting"
           />
-        </div>
+        </dd>
       </div>
-    </div>
+    </dl>
 
     <dl v-else class="info-list">
       <div v-for="(item, i) in confirm.items" :key="i" class="info-row">
@@ -143,7 +148,7 @@ function handleConfirm() {
       <button
         type="button"
         class="btn-confirm"
-        :disabled="submitting"
+        :disabled="!canConfirm"
         @click="handleConfirm"
       >
         {{ submitting ? '处理中…' : (confirm.confirm_label ?? '确认并开始写邮件') }}
@@ -168,78 +173,6 @@ function handleConfirm() {
   font-weight: 600;
 }
 
-.fields {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.field-row {
-  display: grid;
-  grid-template-columns: 88px 1fr;
-  gap: 8px;
-}
-
-.field-row-top {
-  align-items: start;
-}
-
-.field-row-top .field-key {
-  padding-top: 8px;
-}
-
-.field-key {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.field-col {
-  min-width: 0;
-}
-
-.field-hint {
-  margin: 0 0 6px;
-  font-size: 12px;
-  color: var(--text-muted);
-  line-height: 1.5;
-}
-
-.field-input {
-  width: 100%;
-  height: 36px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  color: var(--text);
-  font-size: 13px;
-}
-
-.field-textarea {
-  width: 100%;
-  min-height: 88px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  color: var(--text);
-  font-size: 13px;
-  font-family: inherit;
-  resize: vertical;
-  line-height: 1.5;
-}
-
-.signature-input {
-  min-height: 56px;
-}
-
-.field-input:disabled,
-.field-textarea:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
 .info-list {
   margin: 0 0 12px;
   display: flex;
@@ -258,15 +191,52 @@ function handleConfirm() {
   font-size: 13px;
 }
 
+.info-row-top {
+  align-items: start;
+}
+
+.info-row-top dt {
+  padding-top: 8px;
+}
+
 .info-row dt {
   color: var(--text-secondary);
 }
 
 .info-row dd {
   margin: 0;
+  min-width: 0;
+}
+
+.field-input {
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
   color: var(--text);
-  word-break: break-word;
-  white-space: pre-wrap;
+  font-size: 13px;
+}
+
+.field-textarea {
+  width: 100%;
+  min-height: 88px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.field-input:disabled,
+.field-textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .confirm-footer {

@@ -1,18 +1,19 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import { useMemoryProfile } from '@/composables/useMemoryProfile'
 import { useAuthStore } from '@/stores/useAuthStore'
-import { approveOaApplication, fetchTask, submitOaApplication } from '@/services/taskService'
+import { createHotelBooking, createTransportBooking, fetchTask } from '@/services/taskService'
 import { fetchForm } from '@/services/formService'
 import { formFieldLabels } from '@/mocks/forms'
 import type { Task } from '@/types'
 import {
   buildOaNotifyPayload,
+  bookingPrimaryButtonLabel,
+  bookingStatusBadge,
   detectOaPhase,
-  isPrimaryButtonDisabled,
-  isPrimaryButtonSubmittedStyle,
+  isBookingPrimaryButtonDisabled,
   notifyAssistantOaUpdate,
-  primaryButtonLabel,
   type OaPhase,
 } from '@/utils/oaDemo'
 import { findBookingFormId, type BookingKind } from '@/utils/oaBooking'
@@ -24,6 +25,10 @@ const props = defineProps<{
 
 const route = useRoute()
 const auth = useAuthStore()
+const memory = useMemoryProfile()
+const applicantName = computed(() =>
+  memory.resolveDisplayName(auth.user?.display_name, '员工'),
+)
 
 const loading = ref(true)
 const error = ref<string | null>(null)
@@ -53,14 +58,22 @@ const applicationNo = computed(() => {
   return `${prefix}-${taskId.value.replace(/^task_/, '').toUpperCase()}`
 })
 
-const statusBadge = computed(() => {
-  if (phase.value === 'approved') return { label: '已确认', class: 'approved' }
-  if (phase.value === 'submitted') return { label: '确认中', class: 'pending' }
-  return { label: '待提交', class: 'draft' }
-})
+const statusBadge = computed(() => bookingStatusBadge(phase.value))
+
+const primaryLabel = computed(() => bookingPrimaryButtonLabel(phase.value, submitting.value))
+
+const primaryDisabled = computed(() =>
+  isBookingPrimaryButtonDisabled(phase.value, submitting.value),
+)
+
+const primarySubmittedStyle = computed(() => phase.value === 'approved')
+
+const footerNote = computed(() =>
+  `演示：点击「预定」即可完成${pageTitle.value}，并同步回智能办公助手（进度 2/2）。`,
+)
 
 const approvalChain = computed(() => {
-  const name = auth.user?.display_name ?? '—'
+  const name = applicantName.value || '—'
   const nodes = [
     { role: '预订人', name, status: 'done' as const, time: '刚刚' },
     {
@@ -109,37 +122,23 @@ async function load() {
 }
 
 async function handlePrimaryClick() {
-  if (!task.value || submitting.value || isPrimaryButtonDisabled(phase.value, submitting)) {
+  if (!task.value || submitting.value || primaryDisabled.value) {
     return
   }
 
   submitting.value = true
   toastMessage.value = null
   try {
-    if (phase.value === 'draft') {
-      const res = await submitOaApplication(taskId.value)
-      if (res.code !== 200 || !res.data) {
-        error.value = res.message || '提交失败，请重试'
-        return
-      }
-      task.value = res.data.task
-      phase.value = 'submitted'
-      toastMessage.value = `${pageTitle.value} ${applicationNo.value} 已提交，再次点击可模拟确认完成。`
-      notifyAssistantOaUpdate(buildOaNotifyPayload(res.data, taskId.value, 'submitted'))
+    const createBooking = props.bookingType === 'transport' ? createTransportBooking : createHotelBooking
+    const res = await createBooking(taskId.value)
+    if (res.code !== 200 || !res.data) {
+      error.value = res.message || '预定失败，请重试'
       return
     }
-
-    if (phase.value === 'submitted') {
-      const res = await approveOaApplication(taskId.value)
-      if (res.code !== 200 || !res.data) {
-        error.value = res.message || '确认失败，请重试'
-        return
-      }
-      task.value = res.data.task
-      phase.value = 'approved'
-      toastMessage.value = '预订已确认，状态已同步至智能办公助手。'
-      notifyAssistantOaUpdate(buildOaNotifyPayload(res.data, taskId.value, 'completed'))
-    }
+    task.value = res.data.task
+    phase.value = 'approved'
+    toastMessage.value = `${pageTitle.value} ${applicationNo.value} 已预定成功，状态已同步至智能办公助手。`
+    notifyAssistantOaUpdate(buildOaNotifyPayload(res.data, taskId.value, 'completed'))
   } catch {
     error.value = '操作失败，请返回助手重试'
   } finally {
@@ -165,7 +164,7 @@ onMounted(load)
         </div>
       </div>
       <div class="oa-user">
-        <span>{{ auth.user?.display_name ?? '员工' }}</span>
+        <span>{{ applicantName }}</span>
         <span class="oa-user-id">{{ auth.user?.employee_id ?? '' }}</span>
       </div>
     </header>
@@ -189,7 +188,7 @@ onMounted(load)
           <span class="sync-icon">↗</span>
           <div>
             <strong>数据已从「智能办公助手」同步</strong>
-            <p>请核对乘客/入住信息后提交，确认后将同步回助手任务进度。</p>
+            <p>请核对乘客/入住信息后点击「预定」，完成后将同步回助手任务进度。</p>
           </div>
           <span class="sync-tag">自动同步</span>
         </div>
@@ -304,19 +303,17 @@ onMounted(load)
         </section>
 
         <footer class="oa-footer">
-          <p class="footer-note">
-            演示：首次点击提交进入确认中；再次点击可模拟完成并同步回智能办公助手（进度 2/2）。
-          </p>
+          <p class="footer-note">{{ footerNote }}</p>
           <div class="footer-actions">
             <button type="button" class="btn-secondary" @click="closeWindow">关闭窗口</button>
             <button
               type="button"
               class="btn-primary"
-              :class="{ submitted: isPrimaryButtonSubmittedStyle(phase) }"
-              :disabled="isPrimaryButtonDisabled(phase, submitting)"
+              :class="{ submitted: primarySubmittedStyle }"
+              :disabled="primaryDisabled"
               @click="handlePrimaryClick"
             >
-              {{ primaryButtonLabel(phase, submitting) }}
+              {{ primaryLabel }}
             </button>
           </div>
         </footer>

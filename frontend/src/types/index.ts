@@ -101,9 +101,15 @@ export interface HotelOption {
 export interface BookingSelectionMeta {
   status: 'pending' | 'confirmed'
   booking_kind?: 'transport' | 'hotel'
-  transport_type?: 'flight' | 'train'
+  transport_type?: 'flight' | 'train' | 'drive'
+  leg?: 'outbound' | 'return'
+  needs_return?: boolean
+  departure_date?: string
+  return_date?: string
+  base_location?: string
   needs_flight: boolean
   needs_hotel: boolean
+  origin?: string
   destination: string
   flights: FlightOption[]
   trains?: TrainOption[]
@@ -241,6 +247,8 @@ export interface EmailComposeMeta {
   subject: string
   body: string
   signature: string
+  from_name?: string
+  from_email?: string
 }
 
 export interface MeetingTimeOption {
@@ -359,11 +367,18 @@ export interface TaskSummary {
 
 export type WorkflowNodeStatus = 'pending' | 'running' | 'submitted' | 'completed'
 
+export interface BookingLegProgress {
+  needs_return?: boolean
+  outbound?: 'pending' | 'completed'
+  return?: 'pending' | 'completed'
+}
+
 export interface WorkflowPlanNode {
   id: string
   label: string
   status: WorkflowNodeStatus
   task_id?: string | null
+  booking_progress?: BookingLegProgress
 }
 
 export interface WorkflowPlan {
@@ -375,4 +390,7 @@ export interface WorkflowNextNode {
   node_id: string | null
   label: string | null
   missing_slots: string[]
+  origin?: string
+  destination?: string
+  transport_type?: 'flight' | 'train'
 }

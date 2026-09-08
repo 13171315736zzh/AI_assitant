@@ -56,8 +56,11 @@ CHANGELOG = [
 
 
 def _base_structured(user: User) -> dict:
+    from src.agent.user_memory import is_generic_account_label
+
+    account_name = user.display_name or ""
     return {
-        "display_name": user.display_name or "",
+        "display_name": "" if is_generic_account_label(account_name) else account_name,
         "employee_id": user.employee_id or "",
         "job_role": "",
         "department": "",
@@ -181,11 +184,19 @@ class SettingsService:
         return VersionCheckPublic(has_update=False, message="已是最新版本")
 
     async def get_memory(self, user_id: int) -> MemoryPublic:
+        from src.agent.user_memory import merge_memory_for_use
+
         user = await self._get_user(user_id)
         record = await self._get_or_create_settings(user)
         await self._persist_filtered_memory_items(record)
         public = self._to_memory_public(record)
-        normalized = await self._normalize_structured_fields(public.structured.model_dump())
+        merged = merge_memory_for_use(
+            public.structured.model_dump(),
+            [item.model_dump() for item in public.memory_items],
+            account_display_name=user.display_name or "",
+            account_employee_id=user.employee_id or "",
+        )
+        normalized = await self._normalize_structured_fields(merged)
         public.structured = MemoryStructured.model_validate(normalized)
         return public
 
@@ -219,8 +230,8 @@ class SettingsService:
         user = await self._get_user(user_id)
         record = await self._get_or_create_settings(user)
         return build_user_memory_snippets(
-            display_name=user.display_name,
-            structured=dict(record.structured_json or {}),
+            display_name=user.display_name or "",
+            structured=await self.get_user_structured_memory(user_id),
             memory_items=list(record.memory_items_json or []),
             memory_enabled=record.memory_enabled,
         )
@@ -248,7 +259,11 @@ class SettingsService:
         structured = sanitize_structured_seed(
             dict(record.structured_json or _base_structured(user))
         )
-        if not structured.get("display_name"):
+        from src.agent.user_memory import is_generic_account_label
+
+        if not structured.get("display_name") and not is_generic_account_label(
+            user.display_name or ""
+        ):
             structured["display_name"] = user.display_name
         if not structured.get("employee_id"):
             structured["employee_id"] = user.employee_id
@@ -289,14 +304,18 @@ class SettingsService:
         )
 
     async def get_user_structured_memory(self, user_id: int) -> dict:
+        from src.agent.user_memory import merge_memory_for_use
+
         user = await self._get_user(user_id)
         record = await self._get_or_create_settings(user)
-        structured = dict(record.structured_json or _base_structured(user))
-        if not structured.get("display_name"):
-            structured["display_name"] = user.display_name
-        if not structured.get("employee_id"):
-            structured["employee_id"] = user.employee_id
-        return structured
+        memory_items = list(record.memory_items_json or [])
+        merged = merge_memory_for_use(
+            dict(record.structured_json or _base_structured(user)),
+            memory_items,
+            account_display_name=user.display_name or "",
+            account_employee_id=user.employee_id or "",
+        )
+        return await self._normalize_structured_fields(merged)
 
     async def get_confirmed_position(self, user_id: int) -> str | None:
         user = await self._get_user(user_id)
