@@ -14,7 +14,17 @@ import BusinessFormPanel from '@/components/chat/BusinessFormPanel.vue'
 import ConfirmDialog from '@/components/chat/ConfirmDialog.vue'
 import WorkflowPlanRail from '@/components/chat/WorkflowPlanRail.vue'
 import type { MessageSource, Session, WorkflowPlanNode } from '@/types'
-import { extractWorkflowPlan, findLatestMessageForNode, messageHasPendingInteractivePanel, nodeActivationPrompt, workflowPlanVisible } from '@/utils/workflowPlan'
+import {
+  extractWorkflowPlan,
+  findLatestMessageForNode,
+  messageHasPendingInteractivePanel,
+  nodeActivationPrompt,
+  nodeCanCancel,
+  nodeCanModify,
+  nodeHasOaPage,
+  openOaPageForNode,
+  workflowPlanVisible,
+} from '@/utils/workflowPlan'
 
 const chat = useChatStore()
 const auth = useAuthStore()
@@ -144,6 +154,37 @@ async function focusWorkflowNode(node: WorkflowPlanNode) {
     if (ok) return
   }
 
+  if (node.status === 'cancelled') {
+    if (chat.isActiveSessionEnded || chat.sending) return
+    if (confirm(`「${node.label}」已取消。是否重新开始办理？`)) {
+      await chat.send(nodeActivationPrompt(node.id, node.label))
+    }
+    return
+  }
+
+  const taskId = node.task_id ?? ''
+  const hasOa = nodeHasOaPage(node.id)
+
+  if (taskId && hasOa && nodeCanModify(node.status)) {
+    if (confirm(`「${node.label}」已提交 OA。是否撤回原申请并修改？撤回后将打开 OA 页面。`)) {
+      await chat.withdrawAndOpenOa(taskId, () => openOaPageForNode(node, taskId))
+      return
+    }
+  }
+
+  if (taskId && nodeCanCancel(node.status)) {
+    const assistantMsg = await chat.requestWorkflowCancelConfirm({
+      taskId,
+      nodeId: node.id,
+    })
+    if (assistantMsg) {
+      await messageListRef.value?.scrollToMessage(assistantMsg.id, 'smooth', {
+        highlightInteractive: true,
+      })
+    }
+    return
+  }
+
   if (node.status === 'completed') {
     if (target) {
       await messageListRef.value?.scrollToMessage(target.id)
@@ -201,6 +242,8 @@ async function focusWorkflowNode(node: WorkflowPlanNode) {
         @confirm-meeting-plan="chat.confirmMeetingPlan"
         @confirm-leave-plan="chat.confirmLeavePlan"
         @confirm-info-collect-plan="chat.confirmInfoCollectPlan"
+        @confirm-workflow-cancel="chat.confirmWorkflowCancel"
+        @confirm-meeting-cancel-selection="chat.confirmMeetingCancelSelection"
         @update-card-draft="chat.setWorkflowCardDraft"
         @quick-start="chat.send"
       />
@@ -218,6 +261,7 @@ async function focusWorkflowNode(node: WorkflowPlanNode) {
       :task-id="activeTaskId"
       @close="closePanels"
       @open-form="openForm"
+      @cancel-requested="(messageId) => messageListRef?.scrollToMessage(messageId, 'smooth', { highlightInteractive: true })"
     />
 
     <BusinessFormPanel

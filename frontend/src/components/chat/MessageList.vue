@@ -15,6 +15,9 @@ import type {
   WorkflowNextNode,
   GnMeetingResultMeta,
   RoomBookingResultMeta,
+  WorkflowCancelConfirmMeta,
+  MeetingCancelSelectionMeta,
+  RoomCancelConfirmMeta,
   RelatedTaskMeta,
 } from '@/types'
 import { formatMessageHtml } from '@/utils/messageFormat'
@@ -29,6 +32,8 @@ import LeavePlanConfirmPanel from '@/components/chat/LeavePlanConfirmPanel.vue'
 import MemoryCollectConfirmPanel from '@/components/chat/MemoryCollectConfirmPanel.vue'
 import GnMeetingResultPanel from '@/components/chat/GnMeetingResultPanel.vue'
 import RoomBookingResultPanel from '@/components/chat/RoomBookingResultPanel.vue'
+import WorkflowCancelConfirmPanel from '@/components/chat/WorkflowCancelConfirmPanel.vue'
+import MeetingCancelSelectionPanel from '@/components/chat/MeetingCancelSelectionPanel.vue'
 import WorkflowSessionSummaryPanel from '@/components/chat/WorkflowSessionSummaryPanel.vue'
 import WelcomeQuickActions from '@/components/chat/WelcomeQuickActions.vue'
 import { openOaBookingByKind } from '@/utils/oaBooking'
@@ -74,6 +79,7 @@ const emit = defineEmits<{
     subject?: string
     room?: string | null
     room_flexible?: boolean
+    room_preference?: string
     attendees?: string
     date_hint?: string
     start_hint?: string
@@ -90,6 +96,8 @@ const emit = defineEmits<{
     end_period?: string
   }]
   confirmInfoCollectPlan: [payload: { messageId: string; structured: import('@/mocks/settings').MemoryStructured }]
+  confirmWorkflowCancel: [payload: { messageId: string; task_id: string }]
+  confirmMeetingCancelSelection: [payload: { messageId: string; node_ids: string[] }]
   updateCardDraft: [draft: import('@/utils/workflowCardDraft').WorkflowCardDraft]
   quickStart: [prompt: string]
 }>()
@@ -300,6 +308,9 @@ function hasNonTravelWorkflowSurface(msg: Message): boolean {
     || meta.leave_plan_confirm
     || meta.info_collect_plan_confirm
     || meta.room_selection
+    || meta.workflow_cancel_confirm
+    || meta.room_cancel_confirm
+    || meta.meeting_cancel_selection
   )
 }
 
@@ -355,7 +366,9 @@ function hasInteractivePicker(msg: Message): boolean {
     || travelPlanConfirm(msg)
     || meetingPlanConfirm(msg)
     || leavePlanConfirm(msg)
-    || infoCollectPlanConfirm(msg),
+    || infoCollectPlanConfirm(msg)
+    || (workflowCancelConfirm(msg)?.status === 'pending')
+    || (meetingCancelSelection(msg)?.status === 'pending'),
   )
 }
 
@@ -413,6 +426,42 @@ function infoCollectPlanConfirm(msg: Message): InfoCollectPlanConfirmMeta | null
   const raw = msg.metadata?.info_collect_plan_confirm as InfoCollectPlanConfirmMeta | undefined
   if (!raw || raw.status !== 'pending') return null
   return raw
+}
+
+function meetingCancelSelection(msg: Message): MeetingCancelSelectionMeta | null {
+  const raw = msg.metadata?.meeting_cancel_selection as MeetingCancelSelectionMeta | undefined
+  if (!raw?.options?.length || raw.status === 'superseded') return null
+  return raw
+}
+
+function workflowCancelConfirm(msg: Message): WorkflowCancelConfirmMeta | null {
+  const generic = msg.metadata?.workflow_cancel_confirm as WorkflowCancelConfirmMeta | undefined
+  if (generic?.task_id && generic.status !== 'superseded') {
+    return generic
+  }
+
+  const legacy = msg.metadata?.room_cancel_confirm as RoomCancelConfirmMeta | undefined
+  if (!legacy?.task_id || legacy.status === 'superseded') return null
+
+  const timeValue = legacy.time_label
+    || (legacy.start_time && legacy.end_time
+      ? `${legacy.start_time} — ${legacy.end_time}`
+      : legacy.start_time || legacy.end_time || '—')
+
+  return {
+    status: legacy.status,
+    title: legacy.title,
+    confirm_label: legacy.confirm_label,
+    task_id: legacy.task_id,
+    node_id: 'room',
+    node_label: '会议室',
+    items: [
+      { label: '会议室', value: legacy.room_name },
+      { label: '会议主题', value: legacy.subject },
+      { label: '会议时间', value: timeValue },
+      { label: '参会人员', value: legacy.attendees },
+    ].filter((item) => item.value && item.value !== '—'),
+  }
 }
 
 function handleNextNodeClick(msg: Message) {
@@ -532,6 +581,28 @@ function handleSwitchToFlightBooking() {
             </div>
           </div>
         </div>
+
+        <MeetingCancelSelectionPanel
+          v-if="meetingCancelSelection(msg)"
+          :class="{ 'interactive-focus': focusedInteractiveId === msg.id }"
+          :selection="meetingCancelSelection(msg)!"
+          :submitting="workflowSubmitting"
+          @confirm="emit('confirmMeetingCancelSelection', {
+            messageId: msg.id,
+            node_ids: $event.node_ids,
+          })"
+        />
+
+        <WorkflowCancelConfirmPanel
+          v-if="workflowCancelConfirm(msg)"
+          :class="{ 'interactive-focus': focusedInteractiveId === msg.id }"
+          :confirm="workflowCancelConfirm(msg)!"
+          :submitting="workflowSubmitting"
+          @confirm="emit('confirmWorkflowCancel', {
+            messageId: msg.id,
+            task_id: $event.task_id,
+          })"
+        />
 
         <TravelPlanConfirmPanel
           v-if="travelPlanConfirm(msg)"

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed, nextTick } from 'vue'
-import type { EmailComposeMeta, Message, Session, Task } from '@/types'
+import type { EmailComposeMeta, Message, Session, Task, WorkflowPlan } from '@/types'
 import {
   fetchSessions,
   fetchMessages,
@@ -17,6 +17,9 @@ import {
   confirmMeetingPlan,
   confirmLeavePlan,
   confirmInfoCollectPlan,
+  requestWorkflowCancelConfirm,
+  confirmWorkflowCancel,
+  confirmMeetingCancelSelection,
 } from '@/services/sessionService'
 import { fetchWelcomeMessage } from '@/services/settingsService'
 import { DEFAULT_WELCOME_TEXT } from '@/constants/welcomeQuickActions'
@@ -24,6 +27,10 @@ import {
   findPendingWorkflowCard,
   type WorkflowCardDraft,
 } from '@/utils/workflowCardDraft'
+import {
+  applyCancelledNodesToWorkflowPlan,
+  applyWorkflowPlanToMessages,
+} from '@/utils/workflowPlan'
 import { openMailCompose, saveMailPrefill } from '@/utils/emailMail'
 import type { OaDemoPayload } from '@/utils/oaDemo'
 import { useAuthStore } from './useAuthStore'
@@ -346,6 +353,7 @@ export const useChatStore = defineStore('chat', () => {
             messages.value.push(data.user_message)
           }
           messages.value.push(data.assistant_message)
+          syncWorkflowPlanFromAssistantMessage(data.assistant_message)
           const session = sessions.value.find((s) => s.id === sessionId)
           if (session) {
             session.message_count += 2
@@ -494,6 +502,7 @@ export const useChatStore = defineStore('chat', () => {
     subject?: string
     room?: string | null
     room_flexible?: boolean
+    room_preference?: string
     attendees?: string
     date_hint?: string
     start_hint?: string
@@ -515,6 +524,7 @@ export const useChatStore = defineStore('chat', () => {
         subject: payload.subject ?? (draftPayload.subject as string | undefined),
         room: payload.room ?? (draftPayload.room as string | null | undefined),
         room_flexible: payload.room_flexible ?? (draftPayload.room_flexible as boolean | undefined),
+        room_preference: payload.room_preference ?? (draftPayload.room_preference as string | undefined),
         attendees: payload.attendees ?? (draftPayload.attendees as string | undefined),
         date_hint: payload.date_hint ?? (draftPayload.date_hint as string | undefined),
         start_hint: payload.start_hint ?? (draftPayload.start_hint as string | undefined),
@@ -571,6 +581,14 @@ export const useChatStore = defineStore('chat', () => {
     )
   }
 
+  function cancelledNodeIdFromConfirmMessage(msg: Message | undefined): string | null {
+    if (!msg?.metadata) return null
+    const generic = msg.metadata.workflow_cancel_confirm as { node_id?: string } | undefined
+    if (generic?.node_id) return generic.node_id
+    if (msg.metadata.room_cancel_confirm) return 'room'
+    return null
+  }
+
   async function _confirmWorkflow(
     messageId: string,
     metaKey: string,
@@ -586,6 +604,9 @@ export const useChatStore = defineStore('chat', () => {
   ): Promise<Message | null> {
     if (!activeSessionId.value || workflowSubmitting.value) return null
     const sessionId = activeSessionId.value
+    const cancelNodeId = cancelledNodeIdFromConfirmMessage(
+      messages.value.find((m) => m.id === messageId),
+    )
     workflowSubmitting.value = true
     try {
       const res = await apiCall()
@@ -608,6 +629,13 @@ export const useChatStore = defineStore('chat', () => {
       }
       messages.value.push(res.data.user_message)
       messages.value.push(res.data.assistant_message)
+      syncWorkflowPlanFromAssistantMessage(res.data.assistant_message)
+      if (
+        cancelNodeId
+        && (metaKey === 'workflow_cancel_confirm' || metaKey === 'room_cancel_confirm')
+      ) {
+        messages.value = applyCancelledNodesToWorkflowPlan(messages.value, [cancelNodeId])
+      }
       const session = sessions.value.find((s) => s.id === sessionId)
       if (session) {
         session.message_count += 2
@@ -615,6 +643,14 @@ export const useChatStore = defineStore('chat', () => {
         if (res.data.session_title) {
           session.title = res.data.session_title
         }
+      }
+      if (
+        (metaKey === 'workflow_cancel_confirm' || metaKey === 'room_cancel_confirm')
+        && activeSessionId.value
+      ) {
+        await loadMessages(activeSessionId.value, { silent: true })
+      } else if (!res.data.assistant_message.metadata?.workflow_plan && activeSessionId.value) {
+        await loadMessages(activeSessionId.value, { silent: true })
       }
       return res.data.assistant_message
     } catch {
@@ -643,6 +679,127 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     await loadMessages(payload.sessionId, { silent: true })
+  }
+
+  async function requestWorkflowCancelConfirmAction(payload: {
+    taskId?: string
+    nodeId?: string
+  }) {
+    if (!activeSessionId.value || workflowSubmitting.value) return null
+    const sessionId = activeSessionId.value
+    workflowSubmitting.value = true
+    try {
+      const res = await requestWorkflowCancelConfirm(sessionId, {
+        task_id: payload.taskId ?? null,
+        node_id: payload.nodeId ?? null,
+      })
+      if (res.code !== 200 || !res.data) {
+        alert(res.message || '无法发起取消确认')
+        return null
+      }
+      messages.value.push(res.data.user_message)
+      messages.value.push(res.data.assistant_message)
+      syncWorkflowPlanFromAssistantMessage(res.data.assistant_message)
+      const session = sessions.value.find((s) => s.id === sessionId)
+      if (session) {
+        session.message_count += 2
+        session.updated_at = res.data.assistant_message.created_at
+        if (res.data.session_title) {
+          session.title = res.data.session_title
+        }
+      }
+      return res.data.assistant_message
+    } catch {
+      alert('操作失败，请稍后重试')
+      return null
+    } finally {
+      workflowSubmitting.value = false
+    }
+  }
+
+  function syncWorkflowPlanFromAssistantMessage(assistantMessage: Message) {
+    const plan = assistantMessage.metadata?.workflow_plan as WorkflowPlan | undefined
+    if (!plan?.nodes?.length) return
+    messages.value = applyWorkflowPlanToMessages(messages.value, plan)
+  }
+
+  async function confirmMeetingCancelSelectionAction(payload: {
+    messageId: string
+    node_ids: string[]
+  }) {
+    await _confirmWorkflow(payload.messageId, 'meeting_cancel_selection', () =>
+      confirmMeetingCancelSelection(activeSessionId.value!, {
+        node_ids: payload.node_ids,
+      }),
+    )
+  }
+
+  async function confirmWorkflowCancelAction(payload: { messageId: string; task_id: string }) {
+    const msg = messages.value.find((item) => item.id === payload.messageId)
+    const metaKey = msg?.metadata?.workflow_cancel_confirm
+      ? 'workflow_cancel_confirm'
+      : 'room_cancel_confirm'
+    await _confirmWorkflow(payload.messageId, metaKey, () =>
+      confirmWorkflowCancel(activeSessionId.value!, { task_id: payload.task_id }),
+    )
+  }
+
+  async function cancelWorkflowNode(taskId: string) {
+    if (!taskId || workflowSubmitting.value) return false
+    workflowSubmitting.value = true
+    try {
+      const { cancelTask } = await import('@/services/taskService')
+      const res = await cancelTask(taskId)
+      if (res.code !== 200 || !res.data) {
+        alert(res.message || '取消失败，请稍后重试')
+        return false
+      }
+      if (res.data.assistant_message) {
+        appendAssistantMessageIfNew(res.data.assistant_message)
+        syncWorkflowPlanFromAssistantMessage(res.data.assistant_message)
+      }
+      if (
+        !res.data.assistant_message?.metadata?.workflow_plan
+        && activeSessionId.value
+      ) {
+        await loadMessages(activeSessionId.value, { silent: true })
+      }
+      return true
+    } catch {
+      alert('取消失败，请稍后重试')
+      return false
+    } finally {
+      workflowSubmitting.value = false
+    }
+  }
+
+  async function withdrawAndOpenOa(
+    taskId: string,
+    openPage: () => boolean,
+  ) {
+    if (!taskId || workflowSubmitting.value) return false
+    workflowSubmitting.value = true
+    try {
+      const { withdrawOaApplication } = await import('@/services/taskService')
+      const res = await withdrawOaApplication(taskId)
+      if (res.code !== 200 || !res.data) {
+        alert(res.message || '撤回失败，请稍后重试')
+        return false
+      }
+      if (res.data.assistant_message) {
+        appendAssistantMessageIfNew(res.data.assistant_message)
+      }
+      if (activeSessionId.value) {
+        await loadMessages(activeSessionId.value, { silent: true })
+      }
+      openPage()
+      return true
+    } catch {
+      alert('撤回失败，请稍后重试')
+      return false
+    } finally {
+      workflowSubmitting.value = false
+    }
   }
 
   return {
@@ -676,5 +833,10 @@ export const useChatStore = defineStore('chat', () => {
     confirmInfoCollectPlan: confirmInfoCollectPlanAction,
     clearUserMemory,
     handleOaTaskUpdate,
+    cancelWorkflowNode,
+    withdrawAndOpenOa,
+    requestWorkflowCancelConfirm: requestWorkflowCancelConfirmAction,
+    confirmWorkflowCancel: confirmWorkflowCancelAction,
+    confirmMeetingCancelSelection: confirmMeetingCancelSelectionAction,
   }
 })

@@ -47,6 +47,7 @@ class MeetingPlan:
     subject: str | None = None
     room: str | None = None
     room_flexible: bool = False
+    room_preference: str | None = None
     equipment_pref: str | None = None
     date_hint: str | None = None
     start_hint: str | None = None
@@ -93,7 +94,7 @@ def is_gn_meeting_plan(plan: MeetingPlan) -> bool:
     return plan.needs_gn_meeting
 
 
-def is_meeting_workflow_intent(text: str) -> bool:
+def _meeting_intent_on_text(text: str) -> bool:
     needs_gn, needs_room = detect_meeting_modes(text)
     if needs_gn or needs_room:
         return True
@@ -105,6 +106,22 @@ def is_meeting_workflow_intent(text: str) -> bool:
     ):
         return True
     return bool(_ROOM_PATTERN.search(text))
+
+
+def is_meeting_workflow_intent_current(text: str) -> bool:
+    """仅根据当前这一轮用户发言判断会议意图（已完成会话中的新诉求）。"""
+    from src.agent.travel_workflow import is_transport_or_travel_booking_intent
+
+    latest = (text or "").strip()
+    if not latest:
+        return False
+    if is_transport_or_travel_booking_intent(latest):
+        return False
+    return _meeting_intent_on_text(latest)
+
+
+def is_meeting_workflow_intent(text: str) -> bool:
+    return _meeting_intent_on_text(text)
 
 
 def _normalize_time(hour: int, minute: int = 0) -> str:
@@ -446,7 +463,7 @@ def _room_display(plan: MeetingPlan) -> str:
         return f"{plan.room} 会议室"
     if plan.room_flexible:
         pref = f"（{plan.equipment_pref}）" if plan.equipment_pref else ""
-        return f"灵活选择{pref}"
+        return f"输入其它{pref}"
     return "点选或双击填写"
 
 
@@ -468,9 +485,45 @@ def meeting_plan_confirm_items(plan: MeetingPlan) -> list[dict[str, str]]:
     return items
 
 
+_ROOM_CANCEL = re.compile(r"取消|退订|撤销|作废|不要(?:了)?")
+_ROOM_CANCEL_TARGET = re.compile(
+    r"会议室|会议预约|会议预定|线下会议|room\s*\d+|403|236|235|240",
+    re.I,
+)
+
+
+def is_room_cancel_intent(text: str) -> bool:
+    """取消已预约/进行中的线下会议室（不应打开差旅或会议确认卡）。"""
+    stripped = (text or "").strip()
+    if not stripped or not _ROOM_CANCEL.search(stripped):
+        return False
+    return bool(_ROOM_CANCEL_TARGET.search(stripped))
+
+
+def build_room_cancel_confirm_content() -> str:
+    return "请确认是否取消以下会议室预约："
+
+
+def build_room_cancel_confirm_metadata(snapshot: dict[str, str], task_id: str) -> dict:
+    return {
+        "interactive": True,
+        "room_cancel_confirm": {
+            "status": "pending",
+            "title": "确认取消会议室",
+            "confirm_label": "确认取消",
+            "task_id": task_id,
+            **snapshot,
+        },
+    }
+
+
 def is_meeting_plan_update(text: str) -> bool:
     """待确认会议单存在时，识别用户的补充/修正说明。"""
+    if is_room_cancel_intent(text):
+        return False
     if is_plan_revision_text(text):
+        return True
+    if re.search(r"会议室|会议时间|会议名称|参会|主题|投屏|投影", text):
         return True
     if _MEETING_INTENT.search(text):
         return True
@@ -490,6 +543,8 @@ def build_meeting_plan_confirm_items(plan: MeetingPlan) -> list[dict[str, str]]:
     ]
     if plan.needs_room_booking:
         items.append({"label": "会议室", "value": _room_display(plan)})
+        if plan.room_preference:
+            items.append({"label": "会议室偏好", "value": plan.room_preference})
     elif plan.needs_gn_meeting:
         items.append({"label": "会议形式", "value": "国能会议（线上）"})
     items.extend(
@@ -591,10 +646,12 @@ def build_meeting_plan_confirm_metadata(plan: MeetingPlan) -> dict:
             presets = [room for room in presets if int(room.get("capacity") or 0) >= plan.min_capacity]
         meta["room_options"] = presets
         meta["room_hint"] = (
-            f"已按 {plan.min_capacity} 人以上筛选；点选备选会议室、灵活选择，或在输入框填写会议室名称"
+            f"已按 {plan.min_capacity} 人以上筛选；点选备选会议室，或选择输入其它后填写名称"
             if plan.min_capacity
-            else "点选备选会议室、灵活选择，或在输入框填写会议室名称"
+            else "点选备选会议室，或选择输入其它后填写名称"
         )
+        meta["room_preference"] = plan.room_preference or plan.equipment_pref or ""
+        meta["room_preference_hint"] = "如投屏、20 人以上、靠近电梯等"
         if plan.min_capacity:
             meta["min_capacity"] = plan.min_capacity
     return {
@@ -628,6 +685,13 @@ def apply_meeting_plan_draft(plan: MeetingPlan, draft: dict | None) -> MeetingPl
     if room_code:
         plan.room = room_code
         plan.room_flexible = False
+
+    pref = draft.get("room_preference")
+    if pref is not None:
+        text = str(pref).strip()
+        plan.room_preference = text or None
+        if text and re.search(r"投屏|投影", text):
+            plan.equipment_pref = "投影"
 
     if draft.get("date_hint"):
         plan.date_hint = str(draft["date_hint"])

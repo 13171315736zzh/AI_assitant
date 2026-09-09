@@ -197,6 +197,22 @@ class FormService:
             message=summary,
         )
 
+    async def reopen_for_edit(self, user_id: int, form_id: str) -> FormStatusPublic | None:
+        """撤回 OA 提交后，将表单恢复为可编辑状态。"""
+        record = await self.form_repo.get_by_id(form_id, user_id)
+        if record is None:
+            return None
+        if record.status not in ("submitted", "receipt"):
+            return FormStatusPublic(form_id=record.id, status=record.status)
+        updated = await self.form_repo.update(
+            record,
+            status="confirmed",
+            receipt_id=None,
+            receipt_summary=None,
+            submitted_at=None,
+        )
+        return FormStatusPublic(form_id=updated.id, status=updated.status)
+
     async def get_receipt(self, user_id: int, form_id: str) -> FormReceiptPublic | None:
         record = await self.form_repo.get_by_id(form_id, user_id)
         if record is None or not record.receipt_id:

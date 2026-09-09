@@ -45,6 +45,7 @@ function nodeDisplayLabel(node: WorkflowPlanNode): string {
 }
 
 function bookingVisualStatus(node: WorkflowPlanNode): string {
+  if (node.status === 'cancelled') return 'cancelled'
   if (node.id !== 'booking') return node.status
   const progress = node.booking_progress
   if (!progress) return node.status
@@ -98,7 +99,9 @@ function handleNodeClick(node: WorkflowPlanNode) {
               type="button"
               class="node-button"
               :class="nodeClass(node)"
-              :title="`${nodeStatusLabel(node.status)} · ${node.status === 'completed' ? '点击查看相关对话' : '点击开始办理或查看进度'}`"
+              :title="node.status === 'cancelled'
+                ? `${nodeStatusLabel(node.status)} · 已取消`
+                : `${nodeStatusLabel(node.status)} · ${node.status === 'completed' ? '点击查看或修改' : '点击办理、修改或取消'}`"
               @click="handleNodeClick(node)"
             >
               <span class="node-label">{{ nodeDisplayLabel(node) }}</span>
@@ -123,6 +126,7 @@ function handleNodeClick(node: WorkflowPlanNode) {
           <span><i class="dot running" />进行中</span>
           <span><i class="dot submitted" />审批中</span>
           <span><i class="dot completed" />已完成</span>
+          <span><i class="dot cancelled" />已取消</span>
         </footer>
 
         <button
@@ -339,6 +343,18 @@ function handleNodeClick(node: WorkflowPlanNode) {
   border-color: #22c55e;
   background: #dcfce7;
   color: #15803d;
+}
+
+.plan-node.cancelled {
+  border-color: #94a3b8;
+  background: #e2e8f0;
+  color: #64748b;
+  opacity: 0.72;
+}
+
+.dot.cancelled {
+  border-color: #94a3b8;
+  background: #e2e8f0;
 }
 
 .rail-legend {

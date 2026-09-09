@@ -30,6 +30,7 @@ from src.agent.workflow_confirm import (
     is_meta_confirmed,
     mark_meta_confirmed,
     mark_meta_superseded,
+    try_reopen_confirmed_plan,
 )
 from src.db.task_models import TaskRecord
 from src.repositories.form import FormRepository
@@ -75,6 +76,9 @@ class LeaveWorkflowService:
             self.message_repo, session_id, "leave_plan_confirm"
         )
         has_pending_plan_flag = has_pending_plan(pending_plan)
+        plan_confirmed = await is_meta_confirmed(
+            self.message_repo, session_id, "leave_plan_confirm"
+        )
 
         queue = await get_pending_workflow_queue(self.message_repo, session_id)
         wp_pending, _ = await get_pending_meta(
@@ -107,12 +111,14 @@ class LeaveWorkflowService:
 
         if not is_leave_workflow_intent(ctx.combined_text):
             card_payload = _leave_card_payload(card_draft)
+            leave_update = is_leave_plan_update(user_content)
             if not (
                 activated_leave
                 or (
                     has_pending_plan_flag
-                    and (is_leave_plan_update(user_content) or card_payload)
+                    and (leave_update or card_payload)
                 )
+                or (plan_confirmed and leave_update)
             ):
                 return None
 
@@ -134,6 +140,23 @@ class LeaveWorkflowService:
                     None,
                 )
             return None
+
+        reopened = await try_reopen_confirmed_plan(
+            self.message_repo,
+            session_id,
+            "leave_plan_confirm",
+            user_content,
+            is_update=is_leave_plan_update,
+            can_present=is_ready_to_execute,
+            build_content=build_leave_plan_confirm_content,
+            build_metadata=build_leave_plan_confirm_metadata,
+            plan=plan,
+            pending_plan_msg=pending_plan_msg,
+            has_pending_plan_flag=has_pending_plan_flag,
+        )
+        if reopened:
+            await self.db.flush()
+            return reopened
 
         if await is_meta_confirmed(self.message_repo, session_id, "leave_plan_confirm"):
             return None

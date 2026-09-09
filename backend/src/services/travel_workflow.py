@@ -37,6 +37,7 @@ from src.agent.travel_workflow import (
     email_only_missing_slots,
     enrich_email_plan_from_memory,
     is_email_only_ready,
+    is_booking_cancel_intent,
     is_email_workflow_intent,
     is_ready_for_hotel_booking,
     is_ready_for_transport_booking,
@@ -49,13 +50,16 @@ from src.agent.travel_workflow import (
     missing_transport_booking_slots,
     needs_return_transport,
     resolve_base_location,
+    resolve_booking_cancel_node,
     resolve_transport_booking_type,
     _extract_travel_purpose,
 )
 from src.agent.workflow_confirm import (
     get_pending_meta,
     get_pending_travel_plan_meta,
+    is_meta_confirmed,
     is_travel_plan_confirmed,
+    supersede_pending_interactive_metas,
     mark_meta_confirmed,
     mark_meta_superseded,
 )
@@ -64,6 +68,7 @@ from src.agent.workflow_plan import (
     get_outbound_selection_from_plan,
     get_workflow_plan_from_session,
     is_parallel_workflow_plan,
+    is_workflow_plan_complete,
     link_task_to_plan,
     match_node_from_text,
     match_plan_node_from_text,
@@ -82,6 +87,7 @@ from src.repositories.user_settings import UserSettingsRepository
 from src.services.form import FormService
 from src.services.project_mapping import ProjectMappingService
 from src.services.settings import SettingsService
+from src.services.task import TaskService
 
 
 def _new_task_id() -> str:
@@ -156,20 +162,33 @@ class TravelWorkflowService:
         )
         has_pending_plan_flag = has_pending_plan(pending_plan)
 
-        if not is_travel_workflow_intent_with_memory(ctx.combined_text, structured):
+        plan_complete = is_workflow_plan_complete(wf_plan)
+        travel_intent = is_travel_workflow_intent_with_memory(ctx.latest_user_text, structured)
+        if not travel_intent and not plan_complete:
+            travel_intent = is_travel_workflow_intent_with_memory(ctx.combined_text, structured)
+
+        plan_confirmed = await is_travel_plan_confirmed(
+            self.message_repo, session_id
+        )
+        plan_update = is_travel_plan_update(user_content)
+
+        if not travel_intent:
             travel_node_active = activated in ("travel", "booking", "hotel")
-            if not (has_pending_plan_flag and is_travel_plan_update(user_content)):
+            if not (
+                (has_pending_plan_flag and plan_update)
+                or (plan_confirmed and plan_update)
+            ):
                 if not travel_node_active:
                     return None
 
         parallel_plan = is_parallel_workflow_plan(wf_plan)
-        if parallel_plan and not has_pending_plan_flag:
+        if parallel_plan and not has_pending_plan_flag and not plan_complete:
             travel_node = activated_plan_node(user_content, wf_plan)
             travel_nodes = {"travel", "booking", "hotel"}
             if travel_node not in travel_nodes and not is_travel_workflow_intent_with_memory(
                 user_content, structured
             ):
-                if not is_travel_plan_update(user_content):
+                if not plan_update and not (plan_confirmed and plan_update):
                     return None
 
         plan = build_travel_plan(
@@ -203,10 +222,6 @@ class TravelWorkflowService:
                 "text",
                 {"interactive": True, "booking_selection": pending_sel},
             )
-
-        plan_confirmed = await is_travel_plan_confirmed(
-            self.message_repo, session_id
-        )
 
         if booking_kind:
             return await self._try_booking_selection_flow(
@@ -244,10 +259,15 @@ class TravelWorkflowService:
         if not plan.trip_days and (plan.departure_hint or plan.return_hint):
             plan.trip_days = max(plan.trip_days or 1, 1)
 
-        if await self._travel_task_created(session_id):
-            if not is_travel_plan_update(user_content):
-                return None
+        if plan_update:
+            await supersede_pending_interactive_metas(
+                self.message_repo, session_id, ["booking_selection"]
+            )
+            await self.db.flush()
             return await return_travel_confirm_card(updated=True)
+
+        if await self._travel_task_created(session_id):
+            return None
 
         return await self._create_task_reply(
             user_id, session_id, plan, user, booking={"flights": [], "hotels": []}
@@ -869,8 +889,14 @@ class TravelWorkflowService:
         has_pending_plan_flag = has_pending_plan(pending_plan)
         email_pending = bool(pending_plan and pending_plan.get("email_only"))
 
+        email_confirmed = await is_meta_confirmed(
+            self.message_repo, session_id, "travel_plan_confirm"
+        )
         if not email_pending and not is_email_workflow_intent(user_content):
-            if not (has_pending_plan_flag and is_travel_plan_update(user_content)):
+            if not (
+                (has_pending_plan_flag and is_travel_plan_update(user_content))
+                or (email_confirmed and is_travel_plan_update(user_content))
+            ):
                 return None
 
         plan = build_travel_plan(
@@ -884,13 +910,16 @@ class TravelWorkflowService:
             plan, structured, display_name, memory_items
         )
 
+        if email_confirmed and not is_travel_plan_update(user_content) and not is_email_workflow_intent(user_content):
+            return None
+
         if pending_plan_msg and has_pending_plan_flag:
             mark_meta_superseded(pending_plan_msg, "travel_plan_confirm")
             await self.db.flush()
 
         content = build_email_plan_confirm_content(
             plan,
-            updated=has_pending_plan_flag,
+            updated=has_pending_plan_flag or email_confirmed,
             structured=structured,
             display_name=display_name,
             memory_items=memory_items,
@@ -955,8 +984,115 @@ class TravelWorkflowService:
         if pending.get("needs_hotel") is not None:
             plan.needs_hotel = bool(pending["needs_hotel"])
 
+    async def _find_booking_task_id(
+        self,
+        user_id: int,
+        session_id: str,
+        node_id: str,
+        wf_plan: dict | None,
+    ) -> str | None:
+        node = _node_by_id(wf_plan, node_id) if wf_plan else None
+        if node and node.get("task_id"):
+            return str(node["task_id"])
+
+        apply_tool = "flight_book" if node_id == "booking" else "hotel_book"
+        messages = await self.message_repo.list_recent_for_context(session_id, limit=30)
+        for record in reversed(messages):
+            meta = record.metadata_json or {}
+            task_id = meta.get("task_id")
+            if not task_id:
+                related = meta.get("related_tasks")
+                if isinstance(related, list):
+                    for item in related:
+                        if not isinstance(item, dict):
+                            continue
+                        kind = item.get("booking_kind")
+                        if node_id == "booking" and kind == "transport" and item.get("task_id"):
+                            return str(item["task_id"])
+                        if node_id == "hotel" and kind == "hotel" and item.get("task_id"):
+                            return str(item["task_id"])
+                continue
+            if record.message_type != "task":
+                continue
+            steps_desc = str(meta.get("steps_desc") or "")
+            category = str(meta.get("category") or "")
+            if node_id == "booking" and (
+                category == "transport_book" or "交通" in steps_desc
+            ):
+                return str(task_id)
+            if node_id == "hotel" and (category == "hotel_book" or "酒店" in steps_desc):
+                return str(task_id)
+
+        for task in await self.task_repo.list_all_by_user(user_id):
+            if task.session_id != session_id or task.status == "cancelled":
+                continue
+            for step in task.steps_json or []:
+                if step.get("tool") == apply_tool:
+                    return task.id
+        return None
+
+    async def _handle_booking_cancel(
+        self,
+        user_id: int,
+        session_id: str,
+        user_content: str,
+        wf_plan: dict | None,
+    ) -> tuple[str, str, dict] | None:
+        node_id = resolve_booking_cancel_node(user_content) or "booking"
+        label = "酒店预订" if node_id == "hotel" else "交通预订"
+        task_id = await self._find_booking_task_id(user_id, session_id, node_id, wf_plan)
+        if not task_id:
+            return (
+                f"未找到可退订的{label}任务。请说明要退订去程还是返程，或先在办理节点中完成预订。",
+                "text",
+                None,
+            )
+
+        await supersede_pending_interactive_metas(
+            self.message_repo, session_id, ["booking_selection"]
+        )
+
+        task_svc = TaskService(self.db)
+        task = await task_svc.get_task(user_id, task_id)
+        if task is None:
+            return (
+                f"未找到可退订的{label}任务，请稍后重试。",
+                "text",
+                None,
+            )
+
+        if task.status == "completed":
+            result = await task_svc.withdraw_oa_application(user_id, task_id)
+            if result is None:
+                return (
+                    f"{label}已完成，暂无法自动退订。请在 OA 页面操作或联系行政协助。",
+                    "text",
+                    None,
+                )
+            content = (
+                f"已撤回{label} OA 申请，原订单已作废。"
+                "如需重新预订，请说明出发日期和车次/航班偏好。"
+            )
+        else:
+            result = await task_svc.cancel_task(user_id, task_id)
+            if result is None:
+                return (
+                    f"退订{label}失败，请稍后重试。",
+                    "text",
+                    None,
+                )
+            content = f"已取消{label}，右侧「{'订车票' if node_id == 'booking' else '订酒店'}」节点已置灰。"
+
+        metadata: dict | None = None
+        if result.assistant_message and isinstance(result.assistant_message, dict):
+            metadata = dict(result.assistant_message.get("metadata") or {})
+
+        return content, "text", metadata
+
     @staticmethod
     def _resolve_booking_kind(user_content: str, wf_plan: dict | None) -> str | None:
+        if is_booking_cancel_intent(user_content):
+            return None
         node_id = match_node_from_text(user_content)
         if wf_plan:
             plan_node = match_plan_node_from_text(user_content, wf_plan)

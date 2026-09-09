@@ -61,6 +61,22 @@ async def cancel_task(
     return success(result.model_dump())
 
 
+@router.post("/{task_id}/withdraw-oa")
+async def withdraw_oa_application(
+    task_id: str,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    result = await svc.withdraw_oa_application(current_user.id, task_id)
+    if result is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法撤回该 OA 申请", code=400),
+        )
+    return success(result.model_dump())
+
+
 @router.post("/{task_id}/confirm")
 async def confirm_task(
     task_id: str,

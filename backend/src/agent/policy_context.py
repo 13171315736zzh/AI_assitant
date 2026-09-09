@@ -17,6 +17,8 @@ NON_TRAVEL_WORKFLOW_META_KEYS = (
     "leave_plan_confirm",
     "info_collect_plan_confirm",
     "room_selection",
+    "workflow_cancel_confirm",
+    "meeting_cancel_selection",
 )
 
 _TRAVEL_WORKFLOW_META_KEYS = (

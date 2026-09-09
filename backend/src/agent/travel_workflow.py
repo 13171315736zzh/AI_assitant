@@ -13,8 +13,8 @@ from src.agent.session_context import is_plan_revision_text, merge_user_texts
 from src.agent.user_memory import resolve_travel_staff_level
 
 _TRAVEL_INTENT = re.compile(
-    r"出差|差旅|订票|机票|酒店|行程|办公地点|驻场|"
-    r"住[两二三四\d]+天|到达.*(?:办公|现场)"
+    r"出差|差旅|订票|订.*?票|订.*?车票|车票|机票|酒店|行程|办公地点|驻场|"
+    r"去[\u4e00-\u9fff]{2,}|住[两二三四\d]+天|到达.*(?:办公|现场)"
 )
 _EMAIL_INTENT = re.compile(r"邮件|发信|通知|告知")
 _BOOK_TRANSPORT = re.compile(r"订票|机票|火车|高铁|车票|航班")
@@ -24,6 +24,12 @@ _BOOK_HOTEL = re.compile(r"酒店|住宿|订房")
 _CONFIRM = re.compile(r"^(是的|好的|可以|没问题|确认|同意|就这样|按这个|开始吧|执行吧)[。！!？?]*$")
 _BOOKING_SELECT = re.compile(
     r"列出|列一下|选项|备选|勾选|让我选|供.?选择|有哪些航班|有哪些酒店|机票.*选|酒店.*选|选哪个|选一个"
+)
+_BOOKING_CANCEL = re.compile(
+    r"退订|退票|退掉|撤销(?:预订|预定|订单)?|取消(?:预订|预定|订单)?|不要(?:了)?"
+)
+_BOOKING_CANCEL_TARGET = re.compile(
+    r"票|航班|火车|高铁|动车|机票|车票|酒店|住宿|订房|交通|去程|返程"
 )
 _PM_PATTERN = re.compile(r"项目经理\s*([\u4e00-\u9fff]{2,4})")
 
@@ -290,8 +296,34 @@ def build_email_plan_confirm_content(
     return "请在下方卡片中核对邮件信息，确认无误后点击「确认并开始写邮件」。"
 
 
+def is_booking_cancel_intent(text: str) -> bool:
+    """退订/取消交通或酒店预订（不应触发新订票或差旅确认卡）。"""
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    if not _BOOKING_CANCEL.search(stripped):
+        return False
+    return bool(_BOOKING_CANCEL_TARGET.search(stripped))
+
+
+def resolve_booking_cancel_node(text: str) -> str | None:
+    """识别要退订的节点：booking（交通）或 hotel。"""
+    if not is_booking_cancel_intent(text):
+        return None
+    if re.search(r"酒店|住宿|订房|入住", text):
+        return "hotel"
+    return "booking"
+
+
+def is_transport_or_travel_booking_intent(text: str) -> bool:
+    """当前轮次是否为订票/出差类诉求（用于排除会议误匹配）。"""
+    if is_booking_cancel_intent(text):
+        return False
+    return bool(_TRAVEL_INTENT.search(text or ""))
+
+
 def is_travel_workflow_intent(text: str) -> bool:
-    return bool(_TRAVEL_INTENT.search(text))
+    return is_transport_or_travel_booking_intent(text)
 
 
 def is_travel_workflow_intent_with_memory(text: str, structured: dict | None = None) -> bool:
@@ -1186,6 +1218,8 @@ def travel_plan_confirm_items(plan: TravelPlan) -> list[dict[str, str]]:
 
 def is_travel_plan_update(text: str) -> bool:
     """待确认出差单存在时，识别用户的补充/修正说明。"""
+    if is_booking_cancel_intent(text):
+        return False
     if is_plan_revision_text(text):
         return True
     if _TRAVEL_INTENT.search(text):

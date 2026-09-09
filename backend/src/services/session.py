@@ -7,6 +7,7 @@ from src.services.meeting_workflow import MeetingWorkflowService
 from src.services.settings import SettingsService
 from src.services.travel_workflow import TravelWorkflowService
 from src.services.workpackage_workflow import WorkpackageWorkflowService
+from src.services.workflow_cancel import WorkflowCancelService
 
 
 def _to_session_public(record) -> SessionPublic:
@@ -179,7 +180,17 @@ class SessionService:
         *,
         card_draft: dict | None = None,
     ) -> tuple[str, str, dict | None]:
-        from src.agent.workflow_plan import prepare_workflow_route, try_session_summary_reply
+        from src.agent.workflow_cancel import (
+            is_meeting_cancel_selection_intent,
+            is_workflow_cancel_intent,
+            resolve_workflow_cancel_node,
+        )
+        from src.agent.workflow_plan import (
+            get_workflow_plan_from_session,
+            prepare_workflow_route,
+            sync_workflow_plan_with_message,
+            try_session_summary_reply,
+        )
 
         summary_reply = await try_session_summary_reply(
             self.message_repo, session_id, content
@@ -195,6 +206,42 @@ class SessionService:
             )
 
         db = self.session_repo.db
+        wf_plan, _ = await sync_workflow_plan_with_message(
+            self.message_repo, session_id, content
+        )
+        if wf_plan is None:
+            wf_plan = await get_workflow_plan_from_session(self.message_repo, session_id)
+        if is_meeting_cancel_selection_intent(content, wf_plan):
+            selection_card = await WorkflowCancelService(db).present_meeting_cancel_selection(
+                user_id, session_id, wf_plan=wf_plan
+            )
+            if selection_card:
+                return await self.agent_service.finalize_outgoing(
+                    session_id,
+                    content,
+                    selection_card[0],
+                    selection_card[1],
+                    selection_card[2],
+                    confirmed_position,
+                )
+        if is_workflow_cancel_intent(content, wf_plan):
+            node_id = resolve_workflow_cancel_node(content, wf_plan)
+            if node_id:
+                cancel_card = await WorkflowCancelService(db).present_cancel_confirm(
+                    user_id,
+                    session_id,
+                    node_id=node_id,
+                    wf_plan=wf_plan,
+                )
+                if cancel_card:
+                    return await self.agent_service.finalize_outgoing(
+                        session_id,
+                        content,
+                        cancel_card[0],
+                        cancel_card[1],
+                        cancel_card[2],
+                        confirmed_position,
+                    )
         preferred_service = await prepare_workflow_route(
             self.message_repo, session_id, content
         )
@@ -626,6 +673,186 @@ class SessionService:
             _to_message_public(assistant_msg),
             session_title,
         )
+
+    async def request_workflow_cancel_confirm(
+        self,
+        user_id: int,
+        session_id: str,
+        *,
+        task_id: str | None = None,
+        node_id: str | None = None,
+    ) -> tuple[MessagePublic, MessagePublic, str] | None | str:
+        from src.agent.workflow_cancel import node_label
+
+        record = await self.session_repo.get_by_id(session_id, user_id)
+        if record is None:
+            return None
+        if record.status == "ended":
+            return "ended"
+
+        label = node_label(node_id) if node_id else "办理项"
+        user_content = f"取消{label}"
+        _, confirmed_position, _travel_staff_level = await self._prepare_agent_context(
+            user_id, session_id, user_content
+        )
+
+        workflow = await WorkflowCancelService(
+            self.session_repo.db
+        ).present_cancel_confirm(
+            user_id, session_id, task_id=task_id, node_id=node_id
+        )
+        if not workflow:
+            return None
+
+        reply_content, message_type, metadata = await self.agent_service.finalize_outgoing(
+            session_id,
+            user_content,
+            workflow[0],
+            workflow[1],
+            workflow_metadata or None,
+            confirmed_position,
+        )
+        user_msg = await self.message_repo.create(session_id, "user", user_content, "text")
+        assistant_msg = await self._create_assistant_message(
+            session_id,
+            reply_content,
+            message_type,
+            metadata=metadata,
+        )
+        record.message_count += 2
+        session_title = await self._refresh_session_title(record)
+        await self.session_repo.update(record)
+        return (
+            _to_message_public(user_msg),
+            _to_message_public(assistant_msg),
+            session_title,
+        )
+
+    async def request_room_cancel_confirm(
+        self,
+        user_id: int,
+        session_id: str,
+        task_id: str | None = None,
+    ) -> tuple[MessagePublic, MessagePublic, str] | None | str:
+        return await self.request_workflow_cancel_confirm(
+            user_id, session_id, task_id=task_id, node_id="room"
+        )
+
+    async def confirm_workflow_cancel(
+        self,
+        user_id: int,
+        session_id: str,
+        task_id: str,
+    ) -> tuple[MessagePublic, MessagePublic, str] | None | str:
+        record = await self._prepare_send(user_id, session_id)
+        if record is None:
+            return None
+        if record == "ended":
+            return "ended"
+
+        user_content = "确认取消办理"
+        _, confirmed_position, _travel_staff_level = await self._prepare_agent_context(
+            user_id, session_id, user_content
+        )
+
+        workflow = await WorkflowCancelService(self.session_repo.db).confirm_cancel(
+            user_id, session_id, task_id
+        )
+        if not workflow:
+            return None
+
+        from src.agent.workflow_plan import get_workflow_plan_from_session
+
+        workflow_metadata = dict(workflow[2] or {})
+        fresh_plan = await get_workflow_plan_from_session(self.message_repo, session_id)
+        if fresh_plan:
+            workflow_metadata["workflow_plan"] = fresh_plan
+
+        reply_content, message_type, metadata = await self.agent_service.finalize_outgoing(
+            session_id,
+            user_content,
+            workflow[0],
+            workflow[1],
+            workflow_metadata or None,
+            confirmed_position,
+        )
+        user_msg = await self.message_repo.create(session_id, "user", user_content, "text")
+        assistant_msg = await self._create_assistant_message(
+            session_id,
+            reply_content,
+            message_type,
+            metadata=metadata,
+        )
+        record.message_count += 2
+        session_title = await self._refresh_session_title(record)
+        await self.session_repo.update(record)
+        return (
+            _to_message_public(user_msg),
+            _to_message_public(assistant_msg),
+            session_title,
+        )
+
+    async def confirm_meeting_cancel_selection(
+        self,
+        user_id: int,
+        session_id: str,
+        node_ids: list[str],
+    ) -> tuple[MessagePublic, MessagePublic, str] | None | str:
+        record = await self._prepare_send(user_id, session_id)
+        if record is None:
+            return None
+        if record == "ended":
+            return "ended"
+
+        user_content = "确认取消会议选择"
+        _, confirmed_position, _travel_staff_level = await self._prepare_agent_context(
+            user_id, session_id, user_content
+        )
+
+        workflow = await WorkflowCancelService(
+            self.session_repo.db
+        ).confirm_meeting_cancel_selection(user_id, session_id, node_ids)
+        if not workflow:
+            return None
+
+        from src.agent.workflow_plan import get_workflow_plan_from_session
+
+        workflow_metadata = dict(workflow[2] or {})
+        fresh_plan = await get_workflow_plan_from_session(self.message_repo, session_id)
+        if fresh_plan:
+            workflow_metadata["workflow_plan"] = fresh_plan
+
+        reply_content, message_type, metadata = await self.agent_service.finalize_outgoing(
+            session_id,
+            user_content,
+            workflow[0],
+            workflow[1],
+            workflow_metadata or None,
+            confirmed_position,
+        )
+        user_msg = await self.message_repo.create(session_id, "user", user_content, "text")
+        assistant_msg = await self._create_assistant_message(
+            session_id,
+            reply_content,
+            message_type,
+            metadata=metadata,
+        )
+        record.message_count += 2
+        session_title = await self._refresh_session_title(record)
+        await self.session_repo.update(record)
+        return (
+            _to_message_public(user_msg),
+            _to_message_public(assistant_msg),
+            session_title,
+        )
+
+    async def confirm_room_cancel(
+        self,
+        user_id: int,
+        session_id: str,
+        task_id: str,
+    ) -> tuple[MessagePublic, MessagePublic, str] | None | str:
+        return await self.confirm_workflow_cancel(user_id, session_id, task_id)
 
     async def confirm_meeting_plan(
         self,

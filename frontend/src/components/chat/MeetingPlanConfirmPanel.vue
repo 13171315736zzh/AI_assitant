@@ -13,6 +13,7 @@ const emit = defineEmits<{
     subject?: string
     room?: string | null
     room_flexible?: boolean
+    room_preference?: string
     attendees?: string
     date_hint?: string
     start_hint?: string
@@ -26,6 +27,7 @@ const attendees = ref(props.confirm.attendees ?? '')
 const selectedRoom = ref<string | null>(props.confirm.selected_room ?? null)
 const roomFlexible = ref(Boolean(props.confirm.room_flexible))
 const customRoom = ref('')
+const roomPreference = ref('')
 const meetingDate = ref('')
 const startTime = ref('14:00')
 const endTime = ref('15:00')
@@ -100,17 +102,18 @@ watch(
   (value) => {
     subject.value = value.subject ?? '工作会议'
     attendees.value = value.attendees ?? ''
+    roomPreference.value = value.room_preference ?? ''
     roomFlexible.value = Boolean(value.room_flexible)
     syncTimeFieldsFromConfirm(value)
 
     const room = value.selected_room ?? null
     const inOptions = value.room_options?.some((item) => item.room === room)
-    if (room && inOptions) {
+    if (roomFlexible.value) {
+      selectedRoom.value = null
+      customRoom.value = room && !inOptions ? room : ''
+    } else if (room && inOptions) {
       selectedRoom.value = room
       customRoom.value = ''
-    } else if (room) {
-      selectedRoom.value = null
-      customRoom.value = room
     } else {
       selectedRoom.value = null
       customRoom.value = ''
@@ -121,9 +124,13 @@ watch(
 
 const isPending = computed(() => props.confirm.status === 'pending')
 
+const showCustomRoomInput = computed(() => roomFlexible.value)
+
 const effectiveRoom = computed(() => {
-  if (roomFlexible.value) return null
-  return selectedRoom.value ?? (customRoom.value.trim() || null)
+  if (roomFlexible.value) {
+    return customRoom.value.trim() || null
+  }
+  return selectedRoom.value
 })
 
 const confirmLabel = computed(() => {
@@ -152,6 +159,7 @@ function buildDraftPayload() {
     room,
     selected_room: room,
     room_flexible: roomFlexible.value,
+    room_preference: roomPreference.value.trim(),
     attendees: attendees.value.trim(),
     date_hint: meetingDate.value,
     start_hint: startTime.value,
@@ -166,7 +174,7 @@ function syncDraft() {
 }
 
 watch(
-  [subject, attendees, selectedRoom, roomFlexible, customRoom, meetingDate, startTime, endTime],
+  [subject, attendees, selectedRoom, roomFlexible, customRoom, roomPreference, meetingDate, startTime, endTime],
   syncDraft,
   { deep: true, immediate: true },
 )
@@ -183,12 +191,6 @@ function selectFlexibleRoom() {
   roomFlexible.value = true
   selectedRoom.value = null
   customRoom.value = ''
-}
-
-function onCustomRoomInput() {
-  if (!isPending.value || !customRoom.value.trim()) return
-  roomFlexible.value = false
-  selectedRoom.value = null
 }
 
 function handleConfirm() {
@@ -253,14 +255,16 @@ function handleConfirm() {
       <div v-if="needsRoomBooking" class="field-row field-row-top">
         <span class="field-key">会议室</span>
         <div class="field-col">
-          <p class="field-hint">{{ confirm.room_hint ?? '点选、灵活选择，或在下方输入会议室名称' }}</p>
+          <p class="field-hint">
+            {{ confirm.room_hint ?? '点选具体会议室，或选择「输入其它」后填写名称' }}
+          </p>
           <div class="chip-list">
             <button
               v-for="option in roomOptions"
               :key="option.room"
               type="button"
               class="chip"
-              :class="{ selected: !roomFlexible && !customRoom.trim() && selectedRoom === option.room }"
+              :class="{ selected: !roomFlexible && selectedRoom === option.room }"
               :disabled="submitting"
               @click="selectRoom(option)"
             >
@@ -273,16 +277,32 @@ function handleConfirm() {
               :disabled="submitting"
               @click="selectFlexibleRoom"
             >
-              灵活选择
+              输入其它
             </button>
           </div>
           <input
+            v-if="showCustomRoomInput"
             v-model="customRoom"
             type="text"
             class="field-input room-input"
-            placeholder="或直接输入会议室名称，如 236、总部 A301"
-            :disabled="submitting || roomFlexible"
-            @input="onCustomRoomInput"
+            placeholder="请输入会议室名称"
+            :disabled="submitting"
+          />
+        </div>
+      </div>
+
+      <div v-if="needsRoomBooking" class="field-row field-row-top">
+        <span class="field-key">会议室偏好</span>
+        <div class="field-col">
+          <p class="field-hint">
+            {{ confirm.room_preference_hint ?? '如投屏、20 人以上、靠近电梯等' }}
+          </p>
+          <textarea
+            v-model="roomPreference"
+            class="attendees-input"
+            rows="2"
+            placeholder="选填，描述对会议室的要求"
+            :disabled="submitting"
           />
         </div>
       </div>

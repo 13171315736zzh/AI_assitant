@@ -276,6 +276,8 @@ export interface MeetingPlanConfirmMeta extends PlanConfirmMeta {
   room_options?: MeetingRoomOption[]
   selected_room?: string | null
   room_flexible?: boolean
+  room_preference?: string
+  room_preference_hint?: string
   subject?: string
   attendees?: string
   date_hint?: string
@@ -297,6 +299,50 @@ export interface RoomBookingResultMeta {
   subject: string
   start_time: string
   end_time: string
+  time_label: string
+  attendees: string
+}
+
+export interface WorkflowCancelConfirmItem {
+  label: string
+  value: string
+}
+
+export interface WorkflowCancelConfirmMeta {
+  status: 'pending' | 'confirmed' | 'superseded'
+  title?: string
+  confirm_label?: string
+  task_id: string
+  node_id: string
+  node_label: string
+  items: WorkflowCancelConfirmItem[]
+  cancel_queue?: Array<{ node_id: string; task_id: string }>
+}
+
+export interface MeetingCancelSelectionOption {
+  node_id: string
+  label: string
+  task_id: string
+  selected?: boolean
+}
+
+export interface MeetingCancelSelectionMeta {
+  status: 'pending' | 'confirmed' | 'superseded'
+  title?: string
+  confirm_label?: string
+  options: MeetingCancelSelectionOption[]
+}
+
+/** @deprecated 兼容旧消息，新消息请使用 WorkflowCancelConfirmMeta */
+export interface RoomCancelConfirmMeta {
+  status: 'pending' | 'confirmed' | 'superseded'
+  title?: string
+  confirm_label?: string
+  task_id: string
+  room_name: string
+  subject: string
+  start_time?: string
+  end_time?: string
   time_label: string
   attendees: string
 }
@@ -365,7 +411,7 @@ export interface TaskSummary {
   created_at: string
 }
 
-export type WorkflowNodeStatus = 'pending' | 'running' | 'submitted' | 'completed'
+export type WorkflowNodeStatus = 'pending' | 'running' | 'submitted' | 'completed' | 'cancelled'
 
 export interface BookingLegProgress {
   needs_return?: boolean

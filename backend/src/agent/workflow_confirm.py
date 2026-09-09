@@ -81,3 +81,57 @@ def mark_meta_superseded(message_record, key: str) -> None:
     item["status"] = "superseded"
     meta[key] = item
     message_record.metadata_json = meta
+
+
+async def supersede_pending_interactive_metas(
+    message_repo, session_id: str, keys: list[str]
+) -> bool:
+    """将最近助手消息里仍为 pending 的交互卡片标记为 superseded。"""
+    messages = await message_repo.list_recent_for_context(session_id, limit=24)
+    changed = False
+    for record in reversed(messages):
+        if record.role != "assistant":
+            continue
+        meta = dict(record.metadata_json or {})
+        record_changed = False
+        for key in keys:
+            item = meta.get(key)
+            if not isinstance(item, dict) or item.get("status") != "pending":
+                continue
+            item = dict(item)
+            item["status"] = "superseded"
+            meta[key] = item
+            record_changed = True
+        if record_changed:
+            record.metadata_json = meta
+            changed = True
+    return changed
+
+
+async def try_reopen_confirmed_plan(
+    message_repo,
+    session_id: str,
+    key: str,
+    user_content: str,
+    *,
+    is_update,
+    can_present,
+    build_content,
+    build_metadata,
+    plan,
+    pending_plan_msg=None,
+    has_pending_plan_flag: bool = False,
+    supersede_keys: list[str] | None = None,
+) -> tuple[str, str, dict] | None:
+    """用户已确认 plan 后又提出修改 → 重新下发可编辑确认卡。"""
+    if not await is_meta_confirmed(message_repo, session_id, key):
+        return None
+    if not is_update(user_content):
+        return None
+    if pending_plan_msg and has_pending_plan_flag:
+        mark_meta_superseded(pending_plan_msg, key)
+    if supersede_keys:
+        await supersede_pending_interactive_metas(message_repo, session_id, supersede_keys)
+    if not can_present(plan):
+        return None
+    return build_content(plan, updated=True), "text", build_metadata(plan)

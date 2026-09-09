@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import re
 from datetime import datetime
 from typing import Any
@@ -33,7 +34,7 @@ _NODE_DEFS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
     ("email", "写邮件", re.compile(r"写邮件|邮件|发信|发邮件|写信|email", re.I)),
     ("room", "会议室", re.compile(r"会议室|预约.*会议|订.*会议|预订会议|约.{0,12}会议|约.{0,8}会|帮我约")),
     ("travel", "差旅单", re.compile(r"出差|差旅(?:申请|单)?|驻场|办公地点")),
-    ("booking", "订车票", re.compile(r"订(?:机)?票|订车票|订机票|机票|航班|高铁|火车(?!站)")),
+    ("booking", "订车票", re.compile(r"订.*?(?:机)?票|订.*?车票|订车票|订机票|机票|航班|高铁|火车(?!站)|车票")),
     ("hotel", "订酒店", re.compile(r"酒店|住宿|订房|入住|住\s*[两二三四五六七八九十\d]+\s*天|住\s*\d+\s*晚")),
     ("workpackage", "填工时", re.compile(r"工时|工包|填报")),
     ("leave", "办请假", re.compile(r"请假|休假|补假")),
@@ -96,8 +97,12 @@ _STAY_HINT = re.compile(r"住\s*[两二三四五六七八九十\d]+\s*天|住\s*
 
 def _infer_implicit_travel_nodes(text: str) -> set[str]:
     """从「机票 + 外地办公点 + 住 N 天」等表述推断差旅/订票/酒店节点。"""
+    from src.agent.travel_workflow import is_booking_cancel_intent
+
     found: set[str] = set()
     if not text.strip():
+        return found
+    if is_booking_cancel_intent(text):
         return found
 
     has_stay = bool(_STAY_HINT.search(text))
@@ -143,6 +148,10 @@ def match_node_from_text(text: str) -> str | None:
     stripped = (text or "").strip()
     if not stripped:
         return None
+    from src.agent.travel_workflow import is_booking_cancel_intent
+
+    if is_booking_cancel_intent(stripped):
+        return None
     for node_id in _DISPLAY_ORDER:
         if _PATTERNS[node_id].search(stripped):
             return node_id
@@ -160,9 +169,11 @@ def activate_plan_node(plan: dict[str, Any], node_id: str) -> bool:
     """激活指定节点；已提交 OA 的其他节点不阻塞并行办理。"""
     node_id = _resolve_node_for_activation(plan, node_id)
     node = _node_by_id(plan, node_id)
-    if node is None or node.get("status") == "completed":
+    if node is None:
         return False
-    if node.get("status") == "pending":
+    if node.get("status") == "completed":
+        return False
+    if node.get("status") in ("pending", "cancelled", "submitted"):
         node["status"] = "running"
     plan["active_node_id"] = node_id
     _enforce_booking_before_hotel(plan)
@@ -202,6 +213,18 @@ def activated_plan_node(text: str, wf_plan: dict[str, Any] | None) -> str | None
     return _resolve_node_for_activation(wf_plan, node_id)
 
 
+def is_workflow_plan_complete(wf_plan: dict[str, Any] | None) -> bool:
+    if not wf_plan:
+        return False
+    nodes = wf_plan.get("nodes")
+    if not isinstance(nodes, list) or not nodes:
+        return False
+    return all(
+        isinstance(node, dict) and node.get("status") == "completed"
+        for node in nodes
+    )
+
+
 def should_service_handle_activation(
     service: str,
     user_content: str,
@@ -210,6 +233,33 @@ def should_service_handle_activation(
     """多节点并行时，各 workflow 只处理用户显式激活的本服务节点。"""
     if not is_parallel_workflow_plan(wf_plan):
         return True
+
+    if is_workflow_plan_complete(wf_plan):
+        from src.agent.travel_workflow import (
+            is_booking_cancel_intent,
+            is_transport_or_travel_booking_intent,
+        )
+        from src.agent.meeting_workflow import (
+            is_meeting_workflow_intent_current,
+            is_room_cancel_intent,
+        )
+
+        node_id = match_node_from_text(user_content)
+        if node_id:
+            allowed = SERVICE_ALLOWED_NODES.get(service)
+            if not allowed:
+                return service_for_node(node_id) == service
+            return node_id in allowed
+        if service == "travel":
+            return is_transport_or_travel_booking_intent(user_content) or is_booking_cancel_intent(
+                user_content
+            )
+        if service == "meeting":
+            return is_meeting_workflow_intent_current(user_content) or is_room_cancel_intent(
+                user_content
+            )
+        return False
+
     node_id = activated_plan_node(user_content, wf_plan)
     if not node_id:
         return True
@@ -225,8 +275,24 @@ async def prepare_workflow_route(
     text: str,
 ) -> str | None:
     """根据会话计划与用户当前消息，决定优先路由的工作流服务。"""
+    from src.agent.travel_workflow import is_transport_or_travel_booking_intent
+    from src.agent.workflow_cancel import is_workflow_cancel_intent, resolve_workflow_cancel_node
+
     plan = await get_workflow_plan_from_session(message_repo, session_id)
+    if plan is not None:
+        plan, _changed = await sync_workflow_plan_with_message(
+            message_repo, session_id, text
+        )
     node_id = match_node_from_text(text)
+    if plan is not None and is_workflow_plan_complete(plan):
+        if node_id:
+            return service_for_node(node_id)
+        if is_workflow_cancel_intent(text, plan):
+            cancel_node = resolve_workflow_cancel_node(text, plan)
+            if cancel_node:
+                return service_for_node(cancel_node)
+        if is_transport_or_travel_booking_intent(text):
+            return "travel"
     if plan is not None:
         plan_node = match_plan_node_from_text(text, plan)
         if plan_node:
@@ -281,6 +347,76 @@ def build_initial_workflow_plan(text: str) -> dict[str, Any] | None:
     return plan
 
 
+def expand_workflow_plan_from_text(
+    plan: dict[str, Any],
+    text: str,
+) -> tuple[dict[str, Any], bool]:
+    """将用户新消息中的办理意图并入已有流程计划（仅追加缺失节点）。"""
+    from src.agent.workflow_cancel import is_workflow_cancel_intent
+
+    stripped = (text or "").strip()
+    if not stripped or is_workflow_cancel_intent(stripped, plan):
+        return plan, False
+
+    detected = detect_workflow_nodes(stripped)
+    detected_ids = {item["id"] for item in detected}
+
+    single = match_node_from_text(stripped)
+    if single and single not in detected_ids:
+        detected.append({"id": single, "label": _LABELS[single]})
+
+    nodes = plan.get("nodes")
+    if not isinstance(nodes, list):
+        return plan, False
+
+    existing_ids = {
+        str(node.get("id"))
+        for node in nodes
+        if isinstance(node, dict) and node.get("id")
+    }
+    changed = False
+    for item in detected:
+        node_id = item["id"]
+        if node_id in existing_ids:
+            continue
+        nodes.append(
+            {
+                "id": node_id,
+                "label": item["label"],
+                "status": "pending",
+                "task_id": None,
+            }
+        )
+        existing_ids.add(node_id)
+        changed = True
+
+    if single and _node_by_id(plan, single) is not None:
+        if activate_plan_node(plan, single):
+            changed = True
+
+    if changed:
+        _normalize_plan_nodes(plan)
+        _enforce_booking_before_hotel(plan)
+    return plan, changed
+
+
+async def sync_workflow_plan_with_message(
+    message_repo,
+    session_id: str,
+    user_content: str,
+) -> tuple[dict[str, Any] | None, bool]:
+    """根据用户最新一句补充流程节点，并持久化到会话计划。"""
+    existing = await get_workflow_plan_from_session(message_repo, session_id)
+    if existing is None:
+        return None, False
+
+    plan = copy.deepcopy(existing)
+    plan, changed = expand_workflow_plan_from_text(plan, user_content)
+    if changed:
+        await _persist_workflow_plan(message_repo, session_id, plan)
+    return plan, changed
+
+
 async def get_workflow_plan_from_session(message_repo, session_id: str) -> dict[str, Any] | None:
     record = await message_repo.find_workflow_plan_message(session_id)
     if record is None:
@@ -295,12 +431,27 @@ async def enrich_metadata_with_workflow_plan(
     session_id: str,
     metadata: dict | None,
     session_text: str,
+    user_content: str | None = None,
 ) -> dict | None:
-    if await get_workflow_plan_from_session(message_repo, session_id):
+    from src.agent.policy_context import latest_user_line
+
+    latest = (user_content or latest_user_line(session_text) or "").strip()
+
+    existing = await get_workflow_plan_from_session(message_repo, session_id)
+    if existing is None:
+        plan = build_initial_workflow_plan(session_text)
+        if plan is None:
+            return metadata
+        meta = dict(metadata or {})
+        meta[_PLAN_META_KEY] = plan
+        return meta
+
+    plan, _changed = await sync_workflow_plan_with_message(
+        message_repo, session_id, latest
+    )
+    if plan is None or len(plan.get("nodes") or []) < 2:
         return metadata
-    plan = build_initial_workflow_plan(session_text)
-    if plan is None:
-        return metadata
+
     meta = dict(metadata or {})
     meta[_PLAN_META_KEY] = plan
     return meta
@@ -450,7 +601,7 @@ def _ensure_valid_active_node(plan: dict[str, Any]) -> None:
     if not active_id:
         return
     node = _node_by_id(plan, active_id)
-    if node and node.get("status") in ("completed", "submitted"):
+    if node and node.get("status") in ("completed", "submitted", "cancelled"):
         _advance_active_node(plan)
     _enforce_booking_before_hotel(plan)
 
@@ -551,6 +702,45 @@ async def link_task_to_plan(
         await _persist_workflow_plan(message_repo, session_id, plan)
 
 
+async def mark_plan_node_cancelled(
+    message_repo,
+    session_id: str,
+    node_id: str,
+    *,
+    task_id: str | None = None,
+) -> dict[str, Any] | None:
+    """将指定流程节点置为已取消（不依赖 task 匹配）。"""
+    if not node_id:
+        return await get_workflow_plan_from_session(message_repo, session_id)
+
+    plan = await get_workflow_plan_from_session(message_repo, session_id)
+    if plan is None:
+        return None
+
+    node = _node_by_id(plan, node_id)
+    if node is None:
+        return plan
+
+    changed = False
+    if task_id and not node.get("task_id"):
+        node["task_id"] = task_id
+        changed = True
+    if node.get("status") != "cancelled":
+        node["status"] = "cancelled"
+        changed = True
+    if plan.get("active_node_id") == node_id:
+        _advance_active_node(plan)
+        changed = True
+
+    _normalize_plan_nodes(plan)
+    if _enforce_booking_before_hotel(plan):
+        changed = True
+
+    if changed:
+        await _persist_workflow_plan(message_repo, session_id, plan)
+    return plan
+
+
 async def update_plan_for_task(
     message_repo,
     session_id: str,
@@ -558,6 +748,7 @@ async def update_plan_for_task(
     status: str,
     *,
     task_steps: list[dict] | None = None,
+    node_id: str | None = None,
 ) -> dict[str, Any] | None:
     from src.agent.task_catalog import infer_category
 
@@ -571,17 +762,26 @@ async def update_plan_for_task(
         return None
 
     matched: list[dict[str, Any]] = []
-    for node in nodes:
-        if not isinstance(node, dict):
-            continue
-        if node.get("task_id") == task_id:
-            matched.append(node)
+    if node_id:
+        node = _node_by_id(plan, node_id)
+        if node is not None:
+            if task_id and not node.get("task_id"):
+                node["task_id"] = task_id
+                changed = True
+            matched = [node]
+
+    if not matched:
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            if node.get("task_id") == task_id:
+                matched.append(node)
 
     if not matched and task_steps:
         category = infer_category(task_steps)
-        node_id = _TASK_CATEGORY_TO_NODE.get(category)
-        if node_id:
-            node = _node_by_id(plan, node_id)
+        inferred_node_id = _TASK_CATEGORY_TO_NODE.get(category)
+        if inferred_node_id:
+            node = _node_by_id(plan, inferred_node_id)
             if node is not None:
                 node["task_id"] = task_id
                 matched = [node]
@@ -598,6 +798,17 @@ async def update_plan_for_task(
 
     if status == "submitted":
         _prepare_parallel_after_submit(plan)
+        changed = True
+
+    if status == "cancelled":
+        if plan.get("active_node_id") in {node.get("id") for node in matched}:
+            _advance_active_node(plan)
+            changed = True
+
+    if status == "running" and any(
+        node.get("status") == "running" for node in matched
+    ):
+        plan["active_node_id"] = matched[0].get("id")
         changed = True
 
     if status == "completed":

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { Task, TaskStep } from '@/types'
-import { fetchTask, cancelTask, confirmTask } from '@/services/taskService'
+import { fetchTask, confirmTask } from '@/services/taskService'
+import { useChatStore } from '@/stores/useChatStore'
 import {
   HIDDEN_RESULT_KEYS,
   taskFieldLabel,
@@ -20,7 +21,10 @@ const props = defineProps<{ taskId: string }>()
 const emit = defineEmits<{
   close: []
   openForm: [formId: string]
+  cancelRequested: [messageId: string]
 }>()
+
+const chat = useChatStore()
 
 const task = ref<Task | null>(null)
 const loading = ref(false)
@@ -88,9 +92,10 @@ function stepStatusLabel(status: TaskStep['status']) {
 }
 
 async function handleCancel() {
-  if (!confirm('确认取消此任务？')) return
-  const res = await cancelTask(props.taskId)
-  if (res.code === 200) await load()
+  const assistantMsg = await chat.requestWorkflowCancelConfirm({ taskId: props.taskId })
+  if (!assistantMsg) return
+  emit('cancelRequested', assistantMsg.id)
+  emit('close')
 }
 
 function oaFormLinkLabel(step: TaskStep): string {

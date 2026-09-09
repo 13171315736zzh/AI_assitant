@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.task_catalog import build_task_summary, category_label, infer_category
 from src.agent.workflow_plan import (
+    _persist_workflow_plan,
+    activate_plan_node,
     append_next_node_guidance,
     build_next_node_guidance,
     update_plan_for_task,
@@ -305,6 +307,20 @@ def _extract_leave_result(
     }
 
 
+def _format_meeting_time_label(
+    start_time: str | None, end_time: str | None, fallback: str | None = None
+) -> str:
+    start = str(start_time or "").strip()
+    end = str(end_time or "").strip()
+    if start and end and end != "—":
+        return f"{start} — {end}"
+    if start:
+        return start
+    if end:
+        return end
+    return str(fallback or "—")
+
+
 def _extract_room_booking_result(steps: list[dict], form_fields: dict | None) -> dict[str, str]:
     room_step = next((s for s in steps if s.get("tool") == "room_book"), None)
     room_raw = ""
@@ -322,9 +338,72 @@ def _extract_room_booking_result(steps: list[dict], form_fields: dict | None) ->
         "subject": str(fields.get("subject") or "—"),
         "start_time": start_time,
         "end_time": end_time,
-        "time_label": time_label or start_time,
+        "time_label": _format_meeting_time_label(start_time, end_time, time_label),
         "attendees": str(fields.get("attendees") or "—"),
     }
+
+
+def _extract_gn_meeting_cancel_snapshot(
+    steps: list[dict],
+    form_fields: dict | None,
+    task_id: str,
+) -> dict[str, str]:
+    fields = form_fields or {}
+    gn_step = next((s for s in steps if s.get("tool") == "gn_meeting_book"), None)
+    step_result = dict((gn_step or {}).get("result") or {})
+    step_params = dict((gn_step or {}).get("params") or {})
+
+    subject = _field_str(fields, "subject")
+    if subject == "—":
+        subject = _field_str(step_params, "subject")
+
+    start_time = _field_str(fields, "start_time")
+    end_time = _field_str(fields, "end_time")
+    time_label = _format_meeting_time_label(
+        None if start_time == "—" else start_time,
+        None if end_time == "—" else end_time,
+    )
+
+    attendees = _field_str(fields, "attendees")
+    meeting_no = _field_str(step_result, "meeting_no")
+    meeting_password = _field_str(step_result, "meeting_password")
+    meeting_link = _field_str(step_result, "meeting_link")
+
+    if meeting_no == "—" and task_id:
+        cred_subject = None if subject == "—" else subject
+        credentials = generate_gn_meeting_credentials(task_id, cred_subject)
+        meeting_no = str(credentials.get("meeting_no") or "—")
+        meeting_password = str(credentials.get("meeting_password") or "—")
+        meeting_link = str(credentials.get("meeting_link") or "—")
+        if subject == "—":
+            subject = str(credentials.get("subject") or "—")
+
+    return {
+        "subject": subject,
+        "start_time": start_time,
+        "end_time": end_time,
+        "time_label": time_label,
+        "attendees": attendees,
+        "meeting_no": meeting_no,
+        "meeting_password": meeting_password,
+        "meeting_link": meeting_link,
+    }
+
+
+def merge_cancel_snapshot(base: dict[str, str], extra: dict[str, str]) -> dict[str, str]:
+    merged = dict(base)
+    for key, value in extra.items():
+        text = str(value or "").strip()
+        if not text or text == "—":
+            continue
+        merged[key] = text
+    if merged.get("time_label") in (None, "", "—"):
+        merged["time_label"] = _format_meeting_time_label(
+            merged.get("start_time"),
+            merged.get("end_time"),
+            merged.get("time_label"),
+        )
+    return merged
 
 
 def _form_id_from_email_step(steps: list[dict]) -> str | None:
@@ -451,14 +530,190 @@ class TaskService:
             return None
         return _to_task_public(record)
 
-    async def cancel_task(self, user_id: int, task_id: str) -> TaskStatusPublic | None:
+    async def cancel_task(
+        self,
+        user_id: int,
+        task_id: str,
+        *,
+        plan_node_id: str | None = None,
+    ) -> OaTaskActionPublic | None:
         record = await self.task_repo.get_by_id(task_id, user_id)
         if record is None:
             return None
         if record.status in ("completed", "cancelled"):
-            return TaskStatusPublic(id=record.id, status=record.status)
-        updated = await self.task_repo.update(record, status="cancelled")
-        return TaskStatusPublic(id=updated.id, status=updated.status)
+            from src.agent.workflow_plan import mark_plan_node_cancelled
+
+            updated_plan = None
+            if plan_node_id:
+                updated_plan = await mark_plan_node_cancelled(
+                    self.message_repo,
+                    record.session_id,
+                    plan_node_id,
+                    task_id=task_id,
+                )
+            elif record.status == "cancelled":
+                updated_plan = await update_plan_for_task(
+                    self.message_repo,
+                    record.session_id,
+                    task_id,
+                    "cancelled",
+                    task_steps=list(record.steps_json or []),
+                )
+            assistant_record = None
+            if updated_plan:
+                assistant_record = await self._append_plan_sync_message(
+                    user_id,
+                    record.session_id,
+                    updated_plan,
+                    "已取消该办理项，右侧节点已置灰。如需重新办理，可再次点击对应节点。",
+                )
+            return OaTaskActionPublic(
+                task=_to_task_public(record),
+                session_id=record.session_id,
+                receipt_id=None,
+                assistant_message=(
+                    _to_message_public(assistant_record).model_dump()
+                    if assistant_record
+                    else None
+                ),
+            )
+
+        steps = list(record.steps_json or [])
+        for step in steps:
+            if step.get("status") in ("running", "pending"):
+                step["status"] = "failed"
+                step["result"] = {
+                    **(step.get("result") or {}),
+                    "cancelled": True,
+                    "cancelled_at": datetime.now(UTC).isoformat(),
+                }
+
+        updated = await self.task_repo.update(
+            record, status="cancelled", steps_json=steps
+        )
+        updated_plan = await update_plan_for_task(
+            self.message_repo,
+            updated.session_id,
+            task_id,
+            "cancelled",
+            task_steps=steps,
+            node_id=plan_node_id,
+        )
+        assistant_record = await self._append_plan_sync_message(
+            user_id,
+            updated.session_id,
+            updated_plan,
+            "已取消该办理项，右侧节点已置灰。如需重新办理，可再次点击对应节点。",
+        )
+        return OaTaskActionPublic(
+            task=_to_task_public(updated),
+            session_id=updated.session_id,
+            receipt_id=None,
+            assistant_message=(
+                _to_message_public(assistant_record).model_dump()
+                if assistant_record
+                else None
+            ),
+        )
+
+    async def withdraw_oa_application(
+        self, user_id: int, task_id: str
+    ) -> OaTaskActionPublic | None:
+        """撤回已提交 OA 审批，恢复为可修改并重新提交。"""
+        record = await self.task_repo.get_by_id(task_id, user_id)
+        if record is None or record.status == "cancelled":
+            return None
+
+        steps = list(record.steps_json or [])
+        confirm_step = _find_user_confirm_step(steps)
+        if confirm_step is None:
+            return None
+
+        confirm_result = dict(confirm_step.get("result") or {})
+        form_id = confirm_result.get("form_id")
+        if not form_id:
+            apply_step = _find_apply_step(steps)
+            apply_result = (apply_step or {}).get("result") or {}
+            form_id = apply_result.get("form_id")
+
+        if form_id:
+            await self.form_service.reopen_for_edit(user_id, str(form_id))
+
+        confirm_step["status"] = "pending"
+        confirm_step["result"] = {"form_id": form_id} if form_id else {}
+
+        was_completed = record.status == "completed"
+        if was_completed:
+            for step in steps:
+                if step.get("tool") == "user_confirm":
+                    continue
+                if step.get("status") == "completed":
+                    step["status"] = "running"
+
+        updated = await self.task_repo.update(
+            record,
+            status="running",
+            steps_json=steps,
+            current_step=confirm_step.get("step_id") or record.current_step,
+        )
+        updated_plan = await update_plan_for_task(
+            self.message_repo,
+            updated.session_id,
+            task_id,
+            "running",
+            task_steps=steps,
+        )
+        if updated_plan:
+            node_id = None
+            for node in updated_plan.get("nodes") or []:
+                if isinstance(node, dict) and node.get("task_id") == task_id:
+                    node_id = node.get("id")
+                    break
+            if node_id:
+                activate_plan_node(updated_plan, str(node_id))
+                await _persist_workflow_plan(
+                    self.message_repo, updated.session_id, updated_plan
+                )
+
+        assistant_record = await self._append_plan_sync_message(
+            user_id,
+            updated.session_id,
+            updated_plan,
+            "已撤回 OA 审批，原申请已作废。请打开 OA 页面修改内容后重新提交。",
+        )
+        return OaTaskActionPublic(
+            task=_to_task_public(updated),
+            session_id=updated.session_id,
+            receipt_id=None,
+            assistant_message=(
+                _to_message_public(assistant_record).model_dump()
+                if assistant_record
+                else None
+            ),
+        )
+
+    async def _append_plan_sync_message(
+        self,
+        user_id: int,
+        session_id: str,
+        plan: dict[str, Any] | None,
+        content: str,
+    ):
+        if not session_id or not plan:
+            return None
+        meta: dict[str, Any] = {"workflow_plan": plan}
+        assistant_record = await self.message_repo.create(
+            session_id,
+            "assistant",
+            content,
+            "text",
+            metadata=meta,
+        )
+        session_record = await self.session_repo.get_by_id(session_id, user_id)
+        if session_record is not None:
+            session_record.message_count += 1
+            await self.session_repo.update(session_record)
+        return assistant_record
 
     async def confirm_task(
         self, user_id: int, task_id: str, step_id: int, params: dict | None = None

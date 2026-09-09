@@ -18,6 +18,8 @@ from src.agent.meeting_workflow import (
     build_meeting_plan_confirm_content,
     build_meeting_plan_confirm_metadata,
     build_room_execution_summary,
+    build_room_cancel_confirm_content,
+    build_room_cancel_confirm_metadata,
     build_room_selection_content,
     build_room_selection_metadata,
     build_room_task_metadata,
@@ -26,7 +28,9 @@ from src.agent.meeting_workflow import (
     has_meeting_schedule,
     is_meeting_plan_update,
     is_meeting_workflow_intent,
+    is_meeting_workflow_intent_current,
     is_ready_to_execute,
+    is_room_cancel_intent,
     missing_slots,
     resolve_meeting_datetime,
 )
@@ -36,11 +40,14 @@ from src.agent.workflow_confirm import (
     is_meta_confirmed,
     mark_meta_confirmed,
     mark_meta_superseded,
+    try_reopen_confirmed_plan,
 )
 from src.agent.workflow_plan import (
+    _node_by_id,
     activated_plan_node,
     get_workflow_plan_from_session,
     is_parallel_workflow_plan,
+    is_workflow_plan_complete,
     link_task_to_plan,
     should_service_handle_activation,
 )
@@ -54,6 +61,7 @@ from src.repositories.session import MessageRepository
 from src.repositories.task import TaskRepository
 from src.repositories.user import UserRepository
 from src.services.form import FormService
+from src.services.task import TaskService, _extract_room_booking_result
 
 
 def _new_task_id() -> str:
@@ -94,8 +102,13 @@ class MeetingWorkflowService:
             self.message_repo, session_id, "meeting_plan_confirm"
         )
         has_pending_plan_flag = has_pending_plan(pending_plan)
+        plan_confirmed = await is_meta_confirmed(
+            self.message_repo, session_id, "meeting_plan_confirm"
+        )
+        plan_update = is_meeting_plan_update(user_content)
 
         wf_plan = await get_workflow_plan_from_session(self.message_repo, session_id)
+
         parallel_plan = is_parallel_workflow_plan(wf_plan)
         activated_meeting = activated_plan_node(user_content, wf_plan) in (
             "room",
@@ -104,13 +117,25 @@ class MeetingWorkflowService:
         if parallel_plan and not should_service_handle_activation(
             "meeting", user_content, wf_plan
         ):
-            if not (has_pending_plan_flag and is_meeting_plan_update(user_content)):
+            if not (
+                (has_pending_plan_flag and plan_update)
+                or (plan_confirmed and plan_update)
+                or is_room_cancel_intent(user_content)
+            ):
                 return None
 
-        if not is_meeting_workflow_intent(ctx.combined_text):
+        plan_complete = is_workflow_plan_complete(wf_plan)
+        meeting_intent = (
+            is_meeting_workflow_intent_current(ctx.latest_user_text)
+            if plan_complete
+            else is_meeting_workflow_intent(ctx.combined_text)
+        )
+        if not meeting_intent:
             if not (
-                (has_pending_plan_flag and is_meeting_plan_update(user_content))
+                (has_pending_plan_flag and plan_update)
+                or (plan_confirmed and plan_update)
                 or activated_meeting
+                or is_room_cancel_intent(user_content)
             ):
                 return None
 
@@ -119,13 +144,27 @@ class MeetingWorkflowService:
         plan = apply_meeting_plan_draft(plan, card_payload)
         missing = missing_slots(plan)
 
+        reopened = await try_reopen_confirmed_plan(
+            self.message_repo,
+            session_id,
+            "meeting_plan_confirm",
+            user_content,
+            is_update=is_meeting_plan_update,
+            can_present=can_present_meeting_confirm,
+            build_content=build_meeting_plan_confirm_content,
+            build_metadata=build_meeting_plan_confirm_metadata,
+            plan=plan,
+            pending_plan_msg=pending_plan_msg,
+            has_pending_plan_flag=has_pending_plan_flag,
+            supersede_keys=["room_selection"],
+        )
+        if reopened:
+            await self.db.flush()
+            return reopened
+
         if pending_plan_msg and has_pending_plan_flag:
             mark_meta_superseded(pending_plan_msg, "meeting_plan_confirm")
             await self.db.flush()
-
-        plan_confirmed = await is_meta_confirmed(
-            self.message_repo, session_id, "meeting_plan_confirm"
-        )
 
         pending_msg, pending_sel = await self._get_pending_room_selection(session_id)
         if plan_confirmed and pending_msg and pending_sel:
@@ -181,6 +220,7 @@ class MeetingWorkflowService:
                     "selected_room",
                     "room",
                     "room_flexible",
+                    "room_preference",
                     "attendees",
                     "date_hint",
                     "start_hint",
@@ -484,6 +524,148 @@ class MeetingWorkflowService:
         meta[key] = selection
         message_record.metadata_json = meta
         await self.db.flush()
+
+    async def _find_room_task_id(
+        self,
+        user_id: int,
+        session_id: str,
+        wf_plan: dict | None,
+        explicit_task_id: str | None = None,
+    ) -> str | None:
+        if explicit_task_id:
+            record = await self.task_repo.get_by_id(explicit_task_id, user_id)
+            if record and record.session_id == session_id:
+                return explicit_task_id
+
+        room_node = _node_by_id(wf_plan, "room") if wf_plan else None
+        if room_node and room_node.get("task_id"):
+            return str(room_node["task_id"])
+
+        messages = await self.message_repo.list_recent_for_context(session_id, limit=30)
+        for record in reversed(messages):
+            meta = record.metadata_json or {}
+            task_id = meta.get("task_id")
+            if not task_id or record.message_type != "task":
+                continue
+            category = str(meta.get("category") or "")
+            steps_desc = str(meta.get("steps_desc") or "")
+            if category == "meeting" or "会议室" in steps_desc:
+                return str(task_id)
+            related = meta.get("related_tasks")
+            if isinstance(related, list):
+                for item in related:
+                    if isinstance(item, dict) and item.get("meeting_kind") == "room":
+                        tid = item.get("task_id")
+                        if tid:
+                            return str(tid)
+
+        for task in await self.task_repo.list_all_by_user(user_id):
+            if task.session_id != session_id or task.status == "cancelled":
+                continue
+            for step in task.steps_json or []:
+                if step.get("tool") in ("meeting_book", "room_book"):
+                    return task.id
+        return None
+
+    async def _collect_room_cancel_snapshot(
+        self, user_id: int, task_id: str
+    ) -> dict[str, str] | None:
+        record = await self.task_repo.get_by_id(task_id, user_id)
+        if record is None:
+            return None
+        steps = list(record.steps_json or [])
+        form_id = None
+        for step in steps:
+            if step.get("tool") == "meeting_book":
+                form_id = (step.get("result") or {}).get("form_id")
+                break
+        fields: dict | None = None
+        if form_id:
+            form_record = await self.form_repo.get_by_id(str(form_id), user_id)
+            if form_record and form_record.fields_json:
+                fields = dict(form_record.fields_json)
+        return _extract_room_booking_result(steps, fields)
+
+    async def present_room_cancel_confirm(
+        self,
+        user_id: int,
+        session_id: str,
+        *,
+        task_id: str | None = None,
+        wf_plan: dict | None = None,
+    ) -> tuple[str, str, dict] | None:
+        if wf_plan is None:
+            wf_plan = await get_workflow_plan_from_session(self.message_repo, session_id)
+
+        tid = await self._find_room_task_id(user_id, session_id, wf_plan, task_id)
+        if not tid:
+            return (
+                "未找到可取消的会议室预约。请先在办理流程中完成会议室预约。",
+                "text",
+                None,
+            )
+
+        room_node = _node_by_id(wf_plan, "room") if wf_plan else None
+        if room_node and room_node.get("status") == "cancelled":
+            return ("该会议室预约已取消，右侧节点已置灰。", "text", None)
+
+        pending_msg, pending = await get_pending_meta(
+            self.message_repo, session_id, "room_cancel_confirm"
+        )
+        if pending_msg and pending:
+            mark_meta_superseded(pending_msg, "room_cancel_confirm")
+            await self.db.flush()
+
+        snapshot = await self._collect_room_cancel_snapshot(user_id, tid)
+        if not snapshot:
+            return (
+                "未找到会议室预约详情，请稍后重试。",
+                "text",
+                None,
+            )
+
+        content = build_room_cancel_confirm_content()
+        metadata = build_room_cancel_confirm_metadata(snapshot, tid)
+        return content, "text", metadata
+
+    async def confirm_room_cancel(
+        self, user_id: int, session_id: str, task_id: str
+    ) -> tuple[str, str, dict] | None:
+        pending_msg, pending = await get_pending_meta(
+            self.message_repo, session_id, "room_cancel_confirm"
+        )
+        if pending_msg is None or pending is None:
+            return None
+        if str(pending.get("task_id") or "") != str(task_id):
+            return None
+
+        mark_meta_confirmed(pending_msg, "room_cancel_confirm")
+        await self.db.flush()
+
+        task_svc = TaskService(self.db)
+        task = await task_svc.get_task(user_id, task_id)
+        if task is None:
+            return None
+
+        if task.status == "completed":
+            result = await task_svc.withdraw_oa_application(user_id, task_id)
+            if result is None:
+                return (
+                    "会议室预约已完成，暂无法自动取消。请在 OA 页面操作或联系行政协助。",
+                    "text",
+                    None,
+                )
+            content = "已撤回会议室 OA 申请并取消预约，右侧「会议室」节点已置灰。"
+        else:
+            result = await task_svc.cancel_task(user_id, task_id)
+            if result is None:
+                return ("取消会议室预约失败，请稍后重试。", "text", None)
+            content = "已取消会议室预约，右侧「会议室」节点已置灰。"
+
+        metadata: dict | None = None
+        if result.assistant_message and isinstance(result.assistant_message, dict):
+            metadata = dict(result.assistant_message.get("metadata") or {})
+        return content, "text", metadata
 
     @staticmethod
     def _missing_slots_prompt(missing: list[str], plan: MeetingPlan | None = None) -> str:

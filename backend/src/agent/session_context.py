@@ -9,7 +9,7 @@ from types import SimpleNamespace
 DEFAULT_CONTEXT_LIMIT = 40
 
 _PLAN_REVISION_PATTERN = re.compile(
-    r"改|换|调整|补充|更新|更正|不对|不是|换个|改成|再说|还有|另外|补充一下"
+    r"修改|变更|重新|改为|改|换|调整|补充|更新|更正|不对|不是|换个|改成|再说|还有|另外|补充一下"
 )
 
 

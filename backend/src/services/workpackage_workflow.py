@@ -12,6 +12,7 @@ from src.agent.workflow_confirm import (
     is_meta_confirmed,
     mark_meta_confirmed,
     mark_meta_superseded,
+    try_reopen_confirmed_plan,
 )
 from src.agent.workflow_plan import link_task_to_plan
 from src.agent.workflow_queue import (
@@ -227,6 +228,9 @@ class WorkpackageWorkflowService:
             self.message_repo, session_id, "workpackage_plan_confirm"
         )
         has_pending_plan_flag = has_pending_plan(pending_plan)
+        plan_confirmed = await is_meta_confirmed(
+            self.message_repo, session_id, "workpackage_plan_confirm"
+        )
         card_payload = _workpackage_card_payload(card_draft)
 
         from src.agent.workflow_plan import (
@@ -245,12 +249,14 @@ class WorkpackageWorkflowService:
             return None
 
         if not is_workpackage_workflow_intent(ctx.combined_text):
+            wp_update = is_workpackage_plan_update(user_content)
             if not (
                 activated_workpackage
                 or (
                     has_pending_plan_flag
-                    and (is_workpackage_plan_update(user_content) or card_payload)
+                    and (wp_update or card_payload)
                 )
+                or (plan_confirmed and wp_update)
             ):
                 return None
 
@@ -284,9 +290,30 @@ class WorkpackageWorkflowService:
                         user_id, session_id, plan, fill_plan
                     )
 
-        plan_confirmed = await is_meta_confirmed(
-            self.message_repo, session_id, "workpackage_plan_confirm"
+        def _can_present_workpackage_plan(plan_obj) -> bool:
+            return has_resolved_period(plan_obj) or needs_project_selection(plan_obj)
+
+        reopened = await try_reopen_confirmed_plan(
+            self.message_repo,
+            session_id,
+            "workpackage_plan_confirm",
+            user_content,
+            is_update=is_workpackage_plan_update,
+            can_present=_can_present_workpackage_plan,
+            build_content=build_workpackage_plan_confirm_content,
+            build_metadata=build_workpackage_plan_confirm_metadata,
+            plan=plan,
+            pending_plan_msg=pending_plan_msg,
+            has_pending_plan_flag=has_pending_plan_flag,
+            supersede_keys=["workpackage_confirm"],
         )
+        if reopened:
+            await self.db.flush()
+            content, msg_type, metadata = reopened
+            content, metadata = self._apply_multi_intent(
+                content, metadata, ctx.combined_text
+            )
+            return content, msg_type, metadata
 
         pending_msg, pending_sel = await get_pending_meta(
             self.message_repo, session_id, "workpackage_confirm"

@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useMemoryProfile } from '@/composables/useMemoryProfile'
+import { useOaWithdraw } from '@/composables/useOaWithdraw'
 import { useAuthStore } from '@/stores/useAuthStore'
 import { approveOaApplication, fetchTask, submitOaApplication } from '@/services/taskService'
 import { fetchForm } from '@/services/formService'
@@ -102,6 +103,8 @@ async function load() {
   }
 }
 
+const { withdrawing, handleWithdraw } = useOaWithdraw(taskId, load)
+
 async function handlePrimaryClick() {
   if (!task.value || submitting.value || isPrimaryButtonDisabled(phase.value, submitting.value)) {
     return
@@ -143,6 +146,14 @@ async function handlePrimaryClick() {
 
 function closeWindow() {
   window.close()
+}
+
+async function onWithdraw() {
+  const ok = await handleWithdraw()
+  if (ok) {
+    phase.value = 'draft'
+    toastMessage.value = '已撤回 OA 审批，请修改后重新提交。'
+  }
 }
 
 onMounted(load)
@@ -274,6 +285,15 @@ onMounted(load)
           </p>
           <div class="footer-actions">
             <button type="button" class="btn-secondary" @click="closeWindow">关闭窗口</button>
+            <button
+              v-if="phase !== 'draft'"
+              type="button"
+              class="btn-secondary"
+              :disabled="withdrawing || submitting"
+              @click="onWithdraw"
+            >
+              {{ withdrawing ? '撤回中…' : '撤回并修改' }}
+            </button>
             <button
               type="button"
               class="btn-primary"

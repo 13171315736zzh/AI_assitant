@@ -88,6 +88,7 @@ class AgentService:
             session_id,
             metadata,
             session_text,
+            user_content=user_content,
         )
         return content, message_type, metadata
 

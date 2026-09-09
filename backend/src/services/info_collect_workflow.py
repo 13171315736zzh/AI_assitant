@@ -23,8 +23,10 @@ from src.agent.session_context import extend_user_messages, has_pending_plan, lo
 from src.agent.workflow_card_merge import merge_confirmed_structured
 from src.agent.workflow_confirm import (
     get_pending_meta,
+    is_meta_confirmed,
     mark_meta_confirmed,
     mark_meta_superseded,
+    try_reopen_confirmed_plan,
 )
 from src.models.settings import MemoryStructured, MemoryUpdateRequest
 from src.repositories.session import MessageRepository
@@ -81,9 +83,14 @@ class InfoCollectWorkflowService:
         ):
             return None
 
+        plan_confirmed = await is_meta_confirmed(
+            self.message_repo, session_id, "info_collect_plan_confirm"
+        )
         should_run = is_info_collect_workflow_intent(ctx.combined_text)
         if not should_run and has_pending_plan_flag:
             should_run = is_info_collect_plan_update(user_content) or bool(card_payload)
+        if not should_run and plan_confirmed and is_info_collect_plan_update(user_content):
+            should_run = True
         if not should_run and activated_info:
             should_run = True
         if not should_run:
@@ -120,6 +127,26 @@ class InfoCollectWorkflowService:
                 "text",
                 None,
             )
+
+        reopened = await try_reopen_confirmed_plan(
+            self.message_repo,
+            session_id,
+            "info_collect_plan_confirm",
+            user_content,
+            is_update=is_info_collect_plan_update,
+            can_present=is_ready_to_execute,
+            build_content=build_info_collect_plan_confirm_content,
+            build_metadata=build_info_collect_plan_confirm_metadata,
+            plan=plan,
+            pending_plan_msg=pending_plan_msg,
+            has_pending_plan_flag=has_pending_plan_flag,
+        )
+        if reopened:
+            await self.db.flush()
+            return reopened
+
+        if plan_confirmed:
+            return None
 
         if pending_plan_msg and has_pending_plan_flag:
             mark_meta_superseded(pending_plan_msg, "info_collect_plan_confirm")

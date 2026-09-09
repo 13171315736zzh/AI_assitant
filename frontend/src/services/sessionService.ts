@@ -320,6 +320,7 @@ export async function confirmMeetingPlan(
     subject?: string
     room?: string | null
     room_flexible?: boolean
+    room_preference?: string
     attendees?: string
     date_hint?: string
     start_hint?: string
@@ -339,6 +340,7 @@ export async function confirmMeetingPlan(
     room: payload?.room ?? null,
     selected_room: payload?.room ?? null,
     room_flexible: payload?.room_flexible ?? null,
+    room_preference: payload?.room_preference ?? null,
     attendees: payload?.attendees ?? null,
     date_hint: payload?.date_hint ?? null,
     start_hint: payload?.start_hint ?? null,
@@ -399,6 +401,79 @@ export async function confirmInfoCollectPlan(
     },
   )
   return data
+}
+
+export async function confirmMeetingCancelSelection(
+  sessionId: string,
+  payload: { node_ids: string[] },
+): Promise<
+  ApiResponse<{
+    user_message: Message
+    assistant_message: Message
+    session_title?: string
+  }>
+> {
+  const { data } = await api.post(
+    `/sessions/${encodeURIComponent(sessionId)}/meeting-cancel-selection-confirm`,
+    {
+      confirmed: true,
+      node_ids: payload.node_ids,
+    },
+  )
+  return data
+}
+
+export async function requestWorkflowCancelConfirm(
+  sessionId: string,
+  payload?: { task_id?: string | null; node_id?: string | null },
+): Promise<
+  ApiResponse<{
+    user_message: Message
+    assistant_message: Message
+    session_title?: string
+  }>
+> {
+  const { data } = await api.post(`/sessions/${encodeURIComponent(sessionId)}/workflow-cancel-request`, {
+    task_id: payload?.task_id ?? null,
+    node_id: payload?.node_id ?? null,
+  })
+  return data
+}
+
+export async function confirmWorkflowCancel(
+  sessionId: string,
+  payload: { task_id: string },
+): Promise<
+  ApiResponse<{
+    user_message: Message
+    assistant_message: Message
+    session_title?: string
+  }>
+> {
+  const { data } = await api.post(`/sessions/${encodeURIComponent(sessionId)}/workflow-cancel-confirm`, {
+    confirmed: true,
+    task_id: payload.task_id,
+  })
+  return data
+}
+
+/** @deprecated 请使用 requestWorkflowCancelConfirm */
+export async function requestRoomCancelConfirm(
+  sessionId: string,
+  payload?: { task_id?: string | null },
+) {
+  return requestWorkflowCancelConfirm(sessionId, {
+    task_id: payload?.task_id ?? null,
+    node_id: 'room',
+  })
+}
+
+/** @deprecated 请使用 confirmWorkflowCancel */
+export async function confirmRoomCancel(
+  sessionId: string,
+  payload: { task_id: string },
+) {
+  return confirmWorkflowCancel(sessionId, payload)
 }
 
 export async function clearMemory(): Promise<ApiResponse<{ cleared: boolean }>> {

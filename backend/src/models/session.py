@@ -52,6 +52,30 @@ class RoomSelectionConfirm(BaseModel):
     room: str = Field(..., min_length=1, max_length=32)
 
 
+class RoomCancelRequest(BaseModel):
+    task_id: str | None = Field(default=None, max_length=64)
+
+
+class RoomCancelConfirm(BaseModel):
+    confirmed: bool = True
+    task_id: str = Field(..., min_length=1, max_length=64)
+
+
+class WorkflowCancelRequest(BaseModel):
+    task_id: str | None = Field(default=None, max_length=64)
+    node_id: str | None = Field(default=None, max_length=32)
+
+
+class WorkflowCancelConfirm(BaseModel):
+    confirmed: bool = True
+    task_id: str = Field(..., min_length=1, max_length=64)
+
+
+class MeetingCancelSelectionConfirm(BaseModel):
+    confirmed: bool = True
+    node_ids: list[str] = Field(..., min_length=1, max_length=2)
+
+
 class WorkpackagePlanConfirm(BaseModel):
     confirmed: bool = True
     project: str | None = Field(default=None, max_length=128)
@@ -108,6 +132,7 @@ class MeetingPlanConfirm(PlanConfirm):
     room: str | None = Field(default=None, max_length=32)
     selected_room: str | None = Field(default=None, max_length=32)
     room_flexible: bool | None = None
+    room_preference: str | None = Field(default=None, max_length=500)
     attendees: str | None = Field(default=None, max_length=256)
     date_hint: str | None = Field(default=None, max_length=64)
     start_hint: str | None = Field(default=None, max_length=16)

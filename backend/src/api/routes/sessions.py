@@ -11,6 +11,10 @@ from src.db.session import get_db
 from src.models.session import (
     BookingSelectionConfirm,
     MessageCreate,
+    RoomCancelConfirm,
+    RoomCancelRequest,
+    WorkflowCancelConfirm,
+    WorkflowCancelRequest,
     RoomSelectionConfirm,
     SessionCreate,
     SessionUpdate,
@@ -21,6 +25,7 @@ from src.models.session import (
     LeavePlanConfirm,
     InfoCollectPlanConfirm,
     MeetingPlanConfirm,
+    MeetingCancelSelectionConfirm,
 )
 from src.models.user import UserPublic
 from src.repositories.session import MessageRepository, SessionRepository
@@ -317,6 +322,7 @@ async def confirm_meeting_plan(
                 "room": body.room or body.selected_room,
                 "selected_room": body.selected_room or body.room,
                 "room_flexible": body.room_flexible,
+                "room_preference": body.room_preference,
                 "attendees": body.attendees,
                 "date_hint": body.date_hint,
                 "start_hint": body.start_hint,
@@ -369,6 +375,164 @@ async def confirm_room_selection(
         return JSONResponse(
             status_code=400,
             content=error("会话已结束，无法确认预约", code=400),
+        )
+    user_message, assistant_message, session_title = result
+    return success(
+        {
+            "user_message": user_message.model_dump(),
+            "assistant_message": assistant_message.model_dump(),
+            "session_title": session_title,
+        }
+    )
+
+
+@router.post("/{session_id}/meeting-cancel-selection-confirm")
+async def confirm_meeting_cancel_selection(
+    session_id: str,
+    body: MeetingCancelSelectionConfirm,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    result = await svc.confirm_meeting_cancel_selection(
+        current_user.id, session_id, body.node_ids
+    )
+    if result is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法确认会议取消选择", code=400),
+        )
+    if result == "ended":
+        return JSONResponse(
+            status_code=400,
+            content=error("会话已结束，无法确认", code=400),
+        )
+    user_message, assistant_message, session_title = result
+    return success(
+        {
+            "user_message": user_message.model_dump(),
+            "assistant_message": assistant_message.model_dump(),
+            "session_title": session_title,
+        }
+    )
+
+
+@router.post("/{session_id}/workflow-cancel-request")
+async def request_workflow_cancel_confirm(
+    session_id: str,
+    body: WorkflowCancelRequest,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    result = await svc.request_workflow_cancel_confirm(
+        current_user.id,
+        session_id,
+        task_id=body.task_id,
+        node_id=body.node_id,
+    )
+    if result is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法发起取消确认", code=400),
+        )
+    if result == "ended":
+        return JSONResponse(
+            status_code=400,
+            content=error("会话已结束，无法取消办理", code=400),
+        )
+    user_message, assistant_message, session_title = result
+    return success(
+        {
+            "user_message": user_message.model_dump(),
+            "assistant_message": assistant_message.model_dump(),
+            "session_title": session_title,
+        }
+    )
+
+
+@router.post("/{session_id}/workflow-cancel-confirm")
+async def confirm_workflow_cancel(
+    session_id: str,
+    body: WorkflowCancelConfirm,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    result = await svc.confirm_workflow_cancel(
+        current_user.id, session_id, body.task_id
+    )
+    if result is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法确认取消", code=400),
+        )
+    if result == "ended":
+        return JSONResponse(
+            status_code=400,
+            content=error("会话已结束，无法确认取消", code=400),
+        )
+    user_message, assistant_message, session_title = result
+    return success(
+        {
+            "user_message": user_message.model_dump(),
+            "assistant_message": assistant_message.model_dump(),
+            "session_title": session_title,
+        }
+    )
+
+
+@router.post("/{session_id}/room-cancel-request")
+async def request_room_cancel_confirm(
+    session_id: str,
+    body: RoomCancelRequest,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    result = await svc.request_room_cancel_confirm(
+        current_user.id, session_id, task_id=body.task_id
+    )
+    if result is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法发起会议室取消确认", code=400),
+        )
+    if result == "ended":
+        return JSONResponse(
+            status_code=400,
+            content=error("会话已结束，无法取消预约", code=400),
+        )
+    user_message, assistant_message, session_title = result
+    return success(
+        {
+            "user_message": user_message.model_dump(),
+            "assistant_message": assistant_message.model_dump(),
+            "session_title": session_title,
+        }
+    )
+
+
+@router.post("/{session_id}/room-cancel-confirm")
+async def confirm_room_cancel(
+    session_id: str,
+    body: RoomCancelConfirm,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    result = await svc.confirm_room_cancel(
+        current_user.id, session_id, body.task_id
+    )
+    if result is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法确认取消会议室", code=400),
+        )
+    if result == "ended":
+        return JSONResponse(
+            status_code=400,
+            content=error("会话已结束，无法确认取消", code=400),
         )
     user_message, assistant_message, session_title = result
     return success(

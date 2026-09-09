@@ -61,13 +61,50 @@ export async function fetchTask(taskId: string): Promise<ApiResponse<Task>> {
   return data
 }
 
-export async function cancelTask(taskId: string): Promise<ApiResponse<{ id: string; status: string }>> {
+export type OaTaskActionResult = {
+  task: Task
+  session_id: string
+  receipt_id?: string | null
+  assistant_message?: import('@/types').Message | null
+}
+
+export async function cancelTask(taskId: string): Promise<ApiResponse<OaTaskActionResult>> {
   if (isMockMode('tasks')) {
     const task = mockCancelTask(taskId)
-    if (!task) return { code: 404, message: '任务不存在', data: null as unknown as { id: string; status: string } }
-    return { code: 200, message: 'success', data: { id: task.id, status: task.status } }
+    if (!task) {
+      return { code: 404, message: '任务不存在', data: null as unknown as OaTaskActionResult }
+    }
+    return {
+      code: 200,
+      message: 'success',
+      data: { task, session_id: task.session_id, receipt_id: null, assistant_message: null },
+    }
   }
   const { data } = await api.post(`/tasks/${taskId}/cancel`)
+  return data
+}
+
+export async function withdrawOaApplication(
+  taskId: string,
+): Promise<ApiResponse<OaTaskActionResult>> {
+  if (isMockMode('tasks')) {
+    await delay(300)
+    const task = mockGetTask(taskId)
+    if (!task) {
+      return { code: 404, message: '任务不存在', data: null as unknown as OaTaskActionResult }
+    }
+    return {
+      code: 200,
+      message: 'success',
+      data: {
+        task: { ...task, status: 'running' },
+        session_id: task.session_id,
+        receipt_id: null,
+        assistant_message: null,
+      },
+    }
+  }
+  const { data } = await api.post(`/tasks/${taskId}/withdraw-oa`)
   return data
 }
 
