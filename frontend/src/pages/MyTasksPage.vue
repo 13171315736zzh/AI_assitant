@@ -331,7 +331,7 @@ function nextPage() {
     <TaskDetailPanel
       v-if="activeTaskId"
       :task-id="activeTaskId"
-      @close="closePanels"
+      @dismiss="closePanels"
       @open-form="openForm"
     />
     <BusinessFormPanel v-if="activeFormId" :form-id="activeFormId" @close="closePanels" />

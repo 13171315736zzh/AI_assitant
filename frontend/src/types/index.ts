@@ -269,6 +269,7 @@ export interface MeetingRoomOption {
 
 export interface MeetingPlanConfirmMeta extends PlanConfirmMeta {
   plan_mode?: 'gn_only' | 'room_only' | 'combined'
+  confirm_node_id?: 'gn_meeting' | 'room' | string
   needs_gn_meeting?: boolean
   needs_room_booking?: boolean
   time_options?: MeetingTimeOption[]
@@ -279,6 +280,9 @@ export interface MeetingPlanConfirmMeta extends PlanConfirmMeta {
   room_preference?: string
   room_preference_hint?: string
   subject?: string
+  meeting_name?: string
+  meeting_topic?: string
+  room_display?: string
   attendees?: string
   date_hint?: string
   start_hint?: string
@@ -439,4 +443,26 @@ export interface WorkflowNextNode {
   origin?: string
   destination?: string
   transport_type?: 'flight' | 'train'
+}
+
+export interface WorkflowCompletedNode {
+  node_id: string
+  node_label: string
+  task_id?: string | null
+  task_title?: string
+  steps_desc?: string
+  progress?: string
+  progress_percent?: number
+  meeting_kind?: string
+  booking_kind?: string
+  items: PlanConfirmItem[]
+  oa_label?: string
+}
+
+export interface WorkflowDrawerRequest {
+  taskId?: string | null
+  nodeId?: string | null
+  title?: string
+  items?: PlanConfirmItem[]
+  force?: boolean
 }

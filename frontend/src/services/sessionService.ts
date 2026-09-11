@@ -74,7 +74,7 @@ export async function deleteSession(
 export async function sendMessage(
   sessionId: string,
   content: string,
-): Promise<ApiResponse<{ user_message: Message; assistant_message: Message }>> {
+): Promise<ApiResponse<{ user_message: Message; assistant_message: Message; session_title?: string }>> {
   if (isMockMode('sessions')) {
     await delay(400)
     const result = mockSendMessage(sessionId, content)
@@ -91,7 +91,11 @@ export async function sendMessage(
       data: { user_message: result[0], assistant_message: result[1] },
     }
   }
-  const { data } = await api.post(`/sessions/${sessionId}/messages`, { content })
+  const { data } = await api.post(
+    `/sessions/${sessionId}/messages`,
+    { content },
+    { timeout: 120_000 },
+  )
   return data
 }
 
@@ -117,17 +121,19 @@ function parseSseBlock(block: string): { event: string; data: string } | null {
   return { event, data }
 }
 
+const STREAM_TIMEOUT_MS = 90_000
+
 export async function sendMessageStream(
   sessionId: string,
   content: string,
   handlers: StreamMessageHandlers,
   options?: { cardDraft?: WorkflowCardDraft | null },
-): Promise<void> {
+): Promise<boolean> {
   if (isMockMode('sessions')) {
     const result = mockSendMessage(sessionId, content)
     if (!result) {
       handlers.onError?.('会话已结束，无法发送新消息')
-      return
+      return false
     }
     handlers.onUser?.(result[0])
     await delay(50)
@@ -141,7 +147,7 @@ export async function sendMessageStream(
       assistant_message: result[1],
       session_title: result[2],
     })
-    return
+    return true
   }
 
   const token = localStorage.getItem('token')
@@ -152,48 +158,77 @@ export async function sendMessageStream(
     query.set('card_draft', cardDraftParam)
   }
   const url = `${base}/sessions/${encodeURIComponent(sessionId)}/stream?${query.toString()}`
-  const res = await fetch(url, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  })
-  if (!res.ok || !res.body) {
-    handlers.onError?.('发送失败，请稍后重试')
-    return
+
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), STREAM_TIMEOUT_MS)
+  let doneReceived = false
+  let failed = false
+
+  const onDone: StreamMessageHandlers['onDone'] = (data) => {
+    doneReceived = true
+    handlers.onDone?.(data)
+  }
+  const onError: StreamMessageHandlers['onError'] = (message) => {
+    failed = true
+    handlers.onError?.(message)
   }
 
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
+  try {
+    const res = await fetch(url, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      signal: controller.signal,
+    })
+    if (!res.ok || !res.body) {
+      onError('发送失败，请稍后重试')
+      return false
+    }
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const parts = buffer.split('\n\n')
-    buffer = parts.pop() ?? ''
-    for (const part of parts) {
-      const parsed = parseSseBlock(part.trim())
-      if (!parsed) continue
-      try {
-        const payload = JSON.parse(parsed.data) as Record<string, unknown>
-        if (parsed.event === 'user') {
-          handlers.onUser?.(payload.user_message as Message)
-        } else if (parsed.event === 'ack' && typeof payload.content === 'string') {
-          handlers.onAck?.(payload.content)
-        } else if (parsed.event === 'done') {
-          handlers.onDone?.(
-            payload as {
-              user_message: Message
-              assistant_message: Message
-              session_title?: string
-            },
-          )
-        } else if (parsed.event === 'error') {
-          handlers.onError?.((payload.message as string) ?? '发送失败')
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const parts = buffer.split('\n\n')
+      buffer = parts.pop() ?? ''
+      for (const part of parts) {
+        const parsed = parseSseBlock(part.trim())
+        if (!parsed) continue
+        try {
+          const payload = JSON.parse(parsed.data) as Record<string, unknown>
+          if (parsed.event === 'user') {
+            handlers.onUser?.(payload.user_message as Message)
+          } else if (parsed.event === 'ack' && typeof payload.content === 'string') {
+            handlers.onAck?.(payload.content)
+          } else if (parsed.event === 'done') {
+            onDone(
+              payload as {
+                user_message: Message
+                assistant_message: Message
+                session_title?: string
+              },
+            )
+          } else if (parsed.event === 'error') {
+            onError((payload.message as string) ?? '发送失败')
+            return false
+          }
+        } catch {
+          onError('响应解析失败')
+          return false
         }
-      } catch {
-        handlers.onError?.('响应解析失败')
       }
     }
+    return doneReceived && !failed
+  } catch (err) {
+    if (!doneReceived) {
+      const aborted = err instanceof DOMException && err.name === 'AbortError'
+      onError(aborted ? '请求超时，请稍后重试' : '发送失败，请稍后重试')
+    }
+    return doneReceived
+  } finally {
+    window.clearTimeout(timeoutId)
   }
 }
 
@@ -318,6 +353,8 @@ export async function confirmMeetingPlan(
   payload?: {
     supplementary_content?: string
     subject?: string
+    meeting_name?: string
+    meeting_topic?: string
     room?: string | null
     room_flexible?: boolean
     room_preference?: string
@@ -325,6 +362,7 @@ export async function confirmMeetingPlan(
     date_hint?: string
     start_hint?: string
     end_hint?: string
+    confirm_node_id?: string
   },
 ): Promise<
   ApiResponse<{
@@ -337,6 +375,8 @@ export async function confirmMeetingPlan(
     confirmed: true,
     supplementary_content: payload?.supplementary_content ?? null,
     subject: payload?.subject ?? null,
+    meeting_name: payload?.meeting_name ?? null,
+    meeting_topic: payload?.meeting_topic ?? null,
     room: payload?.room ?? null,
     selected_room: payload?.room ?? null,
     room_flexible: payload?.room_flexible ?? null,
@@ -345,6 +385,7 @@ export async function confirmMeetingPlan(
     date_hint: payload?.date_hint ?? null,
     start_hint: payload?.start_hint ?? null,
     end_hint: payload?.end_hint ?? null,
+    confirm_node_id: payload?.confirm_node_id ?? null,
   })
   return data
 }
@@ -419,6 +460,17 @@ export async function confirmMeetingCancelSelection(
       confirmed: true,
       node_ids: payload.node_ids,
     },
+  )
+  return data
+}
+
+export async function activateWorkflowNode(
+  sessionId: string,
+  nodeId: string,
+): Promise<ApiResponse<{ assistant_message: Message }>> {
+  const { data } = await api.post(
+    `/sessions/${encodeURIComponent(sessionId)}/activate-workflow-node`,
+    { node_id: nodeId },
   )
   return data
 }

@@ -14,6 +14,7 @@ from src.agent.workflow_confirm import (
     mark_meta_superseded,
     try_reopen_confirmed_plan,
 )
+from src.agent.workflow_advance import append_workflow_guidance_after_node
 from src.agent.workflow_plan import link_task_to_plan
 from src.agent.workflow_queue import (
     attach_workflow_queue,
@@ -551,10 +552,10 @@ class WorkpackageWorkflowService:
 
         content = build_execution_summary(plan, task_id, fill_plan)
         metadata = build_task_metadata(plan, task_id)
-        content, metadata = await self._maybe_chain_leave_confirm(
-            session_id, content, metadata
+        result = (content, "task", metadata)
+        return await append_workflow_guidance_after_node(
+            self.message_repo, session_id, "workpackage", result
         )
-        return content, "task", metadata
 
     async def _mark_confirmed(self, message_record) -> None:
         meta = dict(message_record.metadata_json or {})

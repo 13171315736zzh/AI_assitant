@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/useAuthStore'
 import { useChatStore } from '@/stores/useChatStore'
@@ -13,18 +13,15 @@ import DocumentPreviewModal from '@/components/chat/DocumentPreviewModal.vue'
 import BusinessFormPanel from '@/components/chat/BusinessFormPanel.vue'
 import ConfirmDialog from '@/components/chat/ConfirmDialog.vue'
 import WorkflowPlanRail from '@/components/chat/WorkflowPlanRail.vue'
-import type { MessageSource, Session, WorkflowPlanNode } from '@/types'
+import type { MessageSource, Session, WorkflowDrawerRequest, WorkflowPlanNode } from '@/types'
 import {
   extractWorkflowPlan,
   findLatestMessageForNode,
   messageHasPendingInteractivePanel,
-  nodeActivationPrompt,
-  nodeCanCancel,
-  nodeCanModify,
-  nodeHasOaPage,
   openOaPageForNode,
   workflowPlanVisible,
 } from '@/utils/workflowPlan'
+import { filterDrawerItems } from '@/utils/taskOaStatus'
 
 const chat = useChatStore()
 const auth = useAuthStore()
@@ -32,6 +29,10 @@ const route = useRoute()
 const router = useRouter()
 const showTicket = ref(false)
 const activeTaskId = ref<string | null>(null)
+const pendingDrawer = ref<WorkflowDrawerRequest | null>(null)
+const activeNodeId = ref<string | null>(null)
+const dismissedNodeIds = ref<Set<string>>(new Set())
+const drawerEpoch = ref(0)
 const activeFormId = ref<string | null>(null)
 const previewSource = ref<MessageSource | null>(null)
 const deleteTarget = ref<Session | null>(null)
@@ -39,6 +40,7 @@ const deleting = ref(false)
 const workflowRailExpanded = ref(false)
 const userCollapsedRail = ref(false)
 const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
+const chatInputRef = ref<InstanceType<typeof ChatInput> | null>(null)
 
 const workflowPlan = computed(() => extractWorkflowPlan(chat.messages))
 const showWorkflowRail = computed(() => workflowPlanVisible(workflowPlan.value))
@@ -61,6 +63,12 @@ watch(
     if (!userCollapsedRail.value) {
       workflowRailExpanded.value = true
     }
+    const pendingNodeId = pendingDrawer.value?.nodeId
+    if (!pendingNodeId || activeTaskId.value) return
+    const node = plan?.nodes.find((item) => item.id === pendingNodeId)
+    if (node?.task_id) {
+      void openTask(node.task_id, pendingNodeId)
+    }
   },
   { deep: true },
 )
@@ -70,7 +78,14 @@ function toggleWorkflowRail() {
   userCollapsedRail.value = !workflowRailExpanded.value
 }
 
+function onGlobalKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && (activeTaskId.value || pendingDrawer.value || activeFormId.value)) {
+    closePanels()
+  }
+}
+
 onMounted(async () => {
+  window.addEventListener('keydown', onGlobalKeydown)
   await chat.loadSessions()
   const sessionQuery = route.query.session
   const taskQuery = route.query.task
@@ -81,6 +96,10 @@ onMounted(async () => {
     }
     router.replace({ name: 'chat' })
   }
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', onGlobalKeydown)
 })
 
 watch(
@@ -125,20 +144,188 @@ async function confirmDeleteSession() {
   }
 }
 
-function openTask(taskId: string) {
+const NODE_DRAWER_TITLE: Record<string, string> = {
+  gn_meeting: '国能会议任务详情',
+  room: '会议室预约任务详情',
+  leave: '请假任务详情',
+  travel: '差旅任务详情',
+  workpackage: '工时任务详情',
+  booking: '交通预订任务详情',
+  hotel: '酒店预订任务详情',
+  email: '邮件任务详情',
+}
+
+function drawerKey() {
+  return [
+    activeTaskId.value || pendingDrawer.value?.nodeId || 'none',
+    activeNodeId.value || '',
+    drawerEpoch.value,
+  ].join(':')
+}
+
+function rememberDismissedNode(nodeId?: string | null) {
+  if (!nodeId) return
+  const next = new Set(dismissedNodeIds.value)
+  next.add(nodeId)
+  dismissedNodeIds.value = next
+}
+
+function clearDismissedNode(nodeId?: string | null) {
+  if (!nodeId || !dismissedNodeIds.value.has(nodeId)) return
+  const next = new Set(dismissedNodeIds.value)
+  next.delete(nodeId)
+  dismissedNodeIds.value = next
+}
+
+async function openTask(taskId: string, nodeId?: string | null) {
   if (!taskId) return
+  const resolvedNodeId = nodeId
+    || workflowPlan.value?.nodes.find((item) => item.task_id === taskId)?.id
+    || null
+  clearDismissedNode(resolvedNodeId)
+  if (activeTaskId.value === taskId && !pendingDrawer.value && activeNodeId.value === resolvedNodeId) {
+    return
+  }
   activeFormId.value = null
+  pendingDrawer.value = null
   activeTaskId.value = taskId
+  activeNodeId.value = resolvedNodeId
+  drawerEpoch.value += 1
+}
+
+function openWorkflowDrawer(request: WorkflowDrawerRequest) {
+  const node = request.nodeId
+    ? workflowPlan.value?.nodes.find((item) => item.id === request.nodeId)
+    : undefined
+  const taskId = request.taskId || node?.task_id || null
+  if (request.force) {
+    clearDismissedNode(request.nodeId || node?.id)
+  } else if (!taskId && request.nodeId && dismissedNodeIds.value.has(request.nodeId)) {
+    return
+  }
+  if (taskId) {
+    void openTask(taskId, request.nodeId || node?.id)
+    return
+  }
+  if (!request.nodeId && !request.items?.length) return
+  const items = filterDrawerItems(
+    request.items ?? pendingDrawer.value?.items ?? [],
+    request.nodeId,
+    request.title,
+  )
+  if (!activeTaskId.value && pendingDrawer.value?.nodeId === request.nodeId) {
+    pendingDrawer.value = {
+      ...pendingDrawer.value,
+      title: request.title || pendingDrawer.value.title,
+      items,
+    }
+    return
+  }
+  activeFormId.value = null
+  activeTaskId.value = null
+  activeNodeId.value = request.nodeId ?? null
+  pendingDrawer.value = {
+    nodeId: request.nodeId ?? '',
+    title: request.title || NODE_DRAWER_TITLE[request.nodeId ?? ''] || '任务详情',
+    items,
+  }
+  drawerEpoch.value += 1
 }
 
 function openForm(formId: string) {
   activeTaskId.value = null
+  pendingDrawer.value = null
+  activeNodeId.value = null
   activeFormId.value = formId
 }
 
 function closePanels() {
+  rememberDismissedNode(activeNodeId.value || pendingDrawer.value?.nodeId)
   activeTaskId.value = null
+  pendingDrawer.value = null
+  activeNodeId.value = null
   activeFormId.value = null
+  drawerEpoch.value += 1
+}
+
+async function confirmPendingFromDrawer() {
+  const nodeId = activeNodeId.value || pendingDrawer.value?.nodeId
+  if (!nodeId) return
+
+  const planNode = workflowPlan.value?.nodes.find((item) => item.id === nodeId)
+  if (planNode?.task_id) {
+    await openTask(planNode.task_id, nodeId)
+    if (!openOaPageForNode(planNode, planNode.task_id)) {
+      alert('无法打开新窗口，请检查浏览器是否拦截弹窗。')
+    }
+    return
+  }
+
+  const target = findLatestMessageForNode(
+    chat.displayMessages,
+    planNode ?? { id: nodeId, label: nodeId, status: 'pending' },
+  )
+  if (!target || !messageHasPendingInteractivePanel(target, nodeId)) {
+    alert('请先在对话中确认该事项信息')
+    return
+  }
+
+  const roomSelection = target.metadata?.room_selection as { status?: string } | undefined
+  if (nodeId === 'room' && roomSelection?.status === 'pending') {
+    alert('请先在对话中选择会议室，再前往 OA 提交')
+    return
+  }
+
+  if (nodeId === 'gn_meeting' || nodeId === 'room') {
+    const draft = chat.getWorkflowCardDraft(target.id, 'meeting_plan_confirm') ?? {}
+    await chat.confirmMeetingPlan({
+      messageId: target.id,
+      ...draft,
+      confirm_node_id: nodeId,
+    })
+  } else if (nodeId === 'leave') {
+    const draft = chat.getWorkflowCardDraft(target.id, 'leave_plan_confirm') ?? {}
+    await chat.confirmLeavePlan({
+      messageId: target.id,
+      reason: String(draft.reason ?? ''),
+      attachment_name: draft.attachment_name as string | undefined,
+      leave_type: draft.leave_type as string | undefined,
+      date_start: draft.date_start as string | undefined,
+      date_end: draft.date_end as string | undefined,
+      start_period: draft.start_period as string | undefined,
+      end_period: draft.end_period as string | undefined,
+    })
+  } else if (nodeId === 'travel' || nodeId === 'email') {
+    const draft = chat.getWorkflowCardDraft(target.id, 'travel_plan_confirm') ?? {}
+    await chat.confirmTravelPlan({
+      messageId: target.id,
+      ...draft,
+    })
+  } else if (nodeId === 'workpackage') {
+    const draft = chat.getWorkflowCardDraft(target.id, 'workpackage_plan_confirm') ?? {}
+    await chat.confirmWorkpackagePlan({
+      messageId: target.id,
+      project: draft.project as string | undefined,
+      all_days_eight_hours: draft.all_days_eight_hours as boolean | undefined,
+      hours_per_day: draft.hours_per_day as number | undefined,
+    })
+  } else {
+    alert('请先在对话中确认该事项信息')
+    return
+  }
+
+  await nextTick()
+  const nextNode = extractWorkflowPlan(chat.messages)?.nodes.find((item) => item.id === nodeId)
+  if (nextNode?.task_id) {
+    await openTask(nextNode.task_id, nodeId)
+    if (!openOaPageForNode(nextNode, nextNode.task_id)) {
+      alert('无法打开新窗口，请检查浏览器是否拦截弹窗。')
+    }
+    return
+  }
+  if (nodeId === 'room') {
+    alert('请先在对话中选择会议室，再前往 OA 提交')
+  }
 }
 
 function openSource(source: MessageSource) {
@@ -146,59 +333,56 @@ function openSource(source: MessageSource) {
 }
 
 async function focusWorkflowNode(node: WorkflowPlanNode) {
-  const target = findLatestMessageForNode(chat.displayMessages, node)
-  if (target && messageHasPendingInteractivePanel(target, node.id)) {
-    const ok = await messageListRef.value?.scrollToMessage(target.id, 'smooth', {
-      highlightInteractive: true,
+  if (node.task_id) {
+    await openTask(node.task_id)
+  } else {
+    const target = findLatestMessageForNode(chat.displayMessages, node)
+    const items = (target?.metadata?.meeting_plan_confirm
+      || target?.metadata?.leave_plan_confirm
+      || target?.metadata?.travel_plan_confirm
+      || target?.metadata?.workpackage_plan_confirm) as { items?: WorkflowDrawerRequest['items']; title?: string } | undefined
+    openWorkflowDrawer({
+      nodeId: node.id,
+      title: NODE_DRAWER_TITLE[node.id] || `${node.label}任务详情`,
+      items: filterDrawerItems(items?.items ?? [], node.id),
+      force: true,
     })
-    if (ok) return
   }
 
-  if (node.status === 'cancelled') {
-    if (chat.isActiveSessionEnded || chat.sending) return
-    if (confirm(`「${node.label}」已取消。是否重新开始办理？`)) {
-      await chat.send(nodeActivationPrompt(node.id, node.label))
-    }
+  const target = findLatestMessageForNode(chat.displayMessages, node)
+  const hasPending = target
+    ? messageHasPendingInteractivePanel(target, node.id)
+    : false
+
+  if (hasPending && target) {
+    await messageListRef.value?.scrollToMessage(target.id, 'smooth', {
+      highlightInteractive: true,
+    })
     return
   }
 
-  const taskId = node.task_id ?? ''
-  const hasOa = nodeHasOaPage(node.id)
-
-  if (taskId && hasOa && nodeCanModify(node.status)) {
-    if (confirm(`「${node.label}」已提交 OA。是否撤回原申请并修改？撤回后将打开 OA 页面。`)) {
-      await chat.withdrawAndOpenOa(taskId, () => openOaPageForNode(node, taskId))
-      return
-    }
-  }
-
-  if (taskId && nodeCanCancel(node.status)) {
-    const assistantMsg = await chat.requestWorkflowCancelConfirm({
-      taskId,
-      nodeId: node.id,
-    })
+  if (!node.task_id && (node.status === 'pending' || node.status === 'running')) {
+    const assistantMsg = await chat.activateWorkflowNode(node.id)
     if (assistantMsg) {
+      await nextTick()
       await messageListRef.value?.scrollToMessage(assistantMsg.id, 'smooth', {
         highlightInteractive: true,
       })
-    }
-    return
-  }
-
-  if (node.status === 'completed') {
-    if (target) {
-      await messageListRef.value?.scrollToMessage(target.id)
       return
     }
-    alert(`「${node.label}」已完成，暂未找到相关对话记录`)
+  }
+
+  if (target) {
+    await messageListRef.value?.scrollToMessage(target.id, 'smooth', {
+      highlightInteractive: true,
+      highlightOa: Boolean(node.task_id),
+    })
     return
   }
 
-  if (chat.isActiveSessionEnded || chat.sending) {
-    return
+  if (!node.task_id) {
+    alert(`「${node.label}」暂无相关对话记录`)
   }
-
-  await chat.send(nodeActivationPrompt(node.id, node.label))
 }
 </script>
 
@@ -232,7 +416,9 @@ async function focusWorkflowNode(node: WorkflowPlanNode) {
         :messages="chat.displayMessages"
         :workflow-submitting="chat.workflowSubmitting"
         :quick-actions-disabled="chat.isActiveSessionEnded || chat.sending"
+        :active-task-id="activeTaskId"
         @open-task="openTask"
+        @open-drawer="openWorkflowDrawer"
         @open-source="openSource"
         @confirm-booking="chat.confirmBooking"
         @confirm-room="chat.confirmRoom"
@@ -245,10 +431,11 @@ async function focusWorkflowNode(node: WorkflowPlanNode) {
         @confirm-workflow-cancel="chat.confirmWorkflowCancel"
         @confirm-meeting-cancel-selection="chat.confirmMeetingCancelSelection"
         @update-card-draft="chat.setWorkflowCardDraft"
-        @quick-start="chat.send"
+        @quick-start="(prompt) => chat.send(prompt, { useCardDraft: false })"
       />
 
       <ChatInput
+        ref="chatInputRef"
         v-model="chat.activeInputDraft"
         :disabled="chat.isActiveSessionEnded"
         :sending="chat.sending"
@@ -257,11 +444,21 @@ async function focusWorkflowNode(node: WorkflowPlanNode) {
     </section>
 
     <TaskDetailPanel
-      v-if="activeTaskId"
+      v-if="activeTaskId || pendingDrawer"
+      :key="drawerKey()"
       :task-id="activeTaskId"
-      @close="closePanels"
+      :node-id="activeNodeId || pendingDrawer?.nodeId"
+      :pending="pendingDrawer"
+      @dismiss="closePanels"
       @open-form="openForm"
+      @confirm-pending="confirmPendingFromDrawer"
+      @bind-task="(taskId) => openTask(taskId, activeNodeId || pendingDrawer?.nodeId)"
       @cancel-requested="(messageId) => messageListRef?.scrollToMessage(messageId, 'smooth', { highlightInteractive: true })"
+    />
+    <div
+      v-if="activeTaskId || pendingDrawer"
+      class="drawer-spacer"
+      aria-hidden="true"
     />
 
     <BusinessFormPanel
@@ -307,5 +504,10 @@ async function focusWorkflowNode(node: WorkflowPlanNode) {
   display: flex;
   flex-direction: column;
   background: var(--bg);
+}
+
+.drawer-spacer {
+  width: min(480px, 100%);
+  flex-shrink: 0;
 }
 </style>

@@ -7,12 +7,24 @@ import re
 from datetime import datetime
 from typing import Any
 
-from src.agent.leave_workflow import build_leave_plan, missing_slots as leave_missing_slots
+from src.agent.leave_workflow import (
+    build_leave_plan,
+    build_leave_plan_confirm_metadata,
+    missing_slots as leave_missing_slots,
+)
 from src.agent.info_collect_workflow import (
     build_personal_info_plan,
     missing_slots as info_collect_missing_slots,
 )
-from src.agent.meeting_workflow import build_meeting_plan, has_meeting_schedule, missing_slots as meeting_missing_slots
+from src.agent.meeting_workflow import (
+    build_meeting_plan,
+    build_meeting_plan_confirm_metadata,
+    can_present_meeting_confirm,
+    has_meeting_schedule,
+    meeting_plan_for_node,
+    sync_meeting_plan_with_workflow_nodes,
+    missing_slots as meeting_missing_slots,
+)
 from src.agent.session_context import load_session_context, merge_user_texts
 from src.agent.travel_policy_rules import extract_trip_days
 from src.agent.travel_workflow import (
@@ -30,7 +42,9 @@ from src.agent.workflow_queue import split_intent_segments
 _PLAN_META_KEY = "workflow_plan"
 
 _NODE_DEFS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
-    ("gn_meeting", "国能会", re.compile(r"国能会|国能会议|线上会议|视频会议")),
+    ("gn_meeting", "国能会", re.compile(
+        r"国能会|国能会议|线上会议|视频会议|线上会|线上\s*会|线上.{0,8}会"
+    )),
     ("email", "写邮件", re.compile(r"写邮件|邮件|发信|发邮件|写信|email", re.I)),
     ("room", "会议室", re.compile(r"会议室|预约.*会议|订.*会议|预订会议|约.{0,12}会议|约.{0,8}会|帮我约")),
     ("travel", "差旅单", re.compile(r"出差|差旅(?:申请|单)?|驻场|办公地点")),
@@ -139,6 +153,13 @@ def detect_workflow_nodes(text: str) -> list[dict[str, str]]:
                 break
     combined = " ".join(search_parts)
     found_set |= _infer_implicit_travel_nodes(combined)
+    from src.agent.meeting_workflow import detect_meeting_modes
+
+    needs_gn, needs_room = detect_meeting_modes(combined)
+    if needs_gn:
+        found_set.add("gn_meeting")
+    if needs_room:
+        found_set.add("room")
     found_ids = [node_id for node_id in _DISPLAY_ORDER if node_id in found_set]
     return [{"id": node_id, "label": _LABELS[node_id]} for node_id in found_ids]
 
@@ -166,14 +187,14 @@ def match_plan_node_from_text(text: str, plan: dict[str, Any]) -> str | None:
 
 
 def activate_plan_node(plan: dict[str, Any], node_id: str) -> bool:
-    """激活指定节点；已提交 OA 的其他节点不阻塞并行办理。"""
+    """激活指定节点；已提交 OA 的节点不再被文本匹配抢回办理焦点。"""
     node_id = _resolve_node_for_activation(plan, node_id)
     node = _node_by_id(plan, node_id)
     if node is None:
         return False
-    if node.get("status") == "completed":
+    if node.get("status") in ("completed", "submitted"):
         return False
-    if node.get("status") in ("pending", "cancelled", "submitted"):
+    if node.get("status") in ("pending", "cancelled"):
         node["status"] = "running"
     plan["active_node_id"] = node_id
     _enforce_booking_before_hotel(plan)
@@ -303,27 +324,20 @@ async def prepare_workflow_route(
         active_id = plan.get("active_node_id")
         active = _node_by_id(plan, active_id) if active_id else None
         if active and active.get("status") == "submitted":
-            _prepare_parallel_after_submit(plan)
+            _prepare_parallel_after_submit(plan, after_node_id=str(active_id or ""))
             await _persist_workflow_plan(message_repo, session_id, plan)
             return service_for_node(plan.get("active_node_id"))
         return service_for_node(active_id)
     return service_for_node(node_id)
 
 
-def _prepare_parallel_after_submit(plan: dict[str, Any]) -> None:
+def _prepare_parallel_after_submit(
+    plan: dict[str, Any],
+    *,
+    after_node_id: str | None = None,
+) -> None:
     """某节点已提交 OA 后，将焦点切换到下一个可并行办理的节点。"""
-    for node in _nodes_in_display_order(plan):
-        if node.get("id") == "hotel" and not _booking_gate_open(plan):
-            continue
-        if node.get("status") == "pending":
-            node["status"] = "running"
-            plan["active_node_id"] = node.get("id")
-            return
-    for node in _nodes_in_display_order(plan):
-        if node.get("status") == "running":
-            plan["active_node_id"] = node.get("id")
-            return
-    plan["active_node_id"] = None
+    _advance_active_node(plan, after_node_id=after_node_id)
 
 
 def build_initial_workflow_plan(text: str) -> dict[str, Any] | None:
@@ -350,6 +364,8 @@ def build_initial_workflow_plan(text: str) -> dict[str, Any] | None:
 def expand_workflow_plan_from_text(
     plan: dict[str, Any],
     text: str,
+    *,
+    activate: bool = True,
 ) -> tuple[dict[str, Any], bool]:
     """将用户新消息中的办理意图并入已有流程计划（仅追加缺失节点）。"""
     from src.agent.workflow_cancel import is_workflow_cancel_intent
@@ -364,6 +380,8 @@ def expand_workflow_plan_from_text(
     single = match_node_from_text(stripped)
     if single and single not in detected_ids:
         detected.append({"id": single, "label": _LABELS[single]})
+    if activate and _is_confirm_action_text(stripped):
+        activate = False
 
     nodes = plan.get("nodes")
     if not isinstance(nodes, list):
@@ -390,7 +408,7 @@ def expand_workflow_plan_from_text(
         existing_ids.add(node_id)
         changed = True
 
-    if single and _node_by_id(plan, single) is not None:
+    if activate and single and _node_by_id(plan, single) is not None:
         if activate_plan_node(plan, single):
             changed = True
 
@@ -410,8 +428,19 @@ async def sync_workflow_plan_with_message(
     if existing is None:
         return None, False
 
+    ctx = await load_session_context(message_repo, session_id, user_content=user_content)
+    combined = merge_user_texts(
+        [
+            record.content.strip()
+            for record in ctx.user_messages
+            if getattr(record, "role", None) == "user" and record.content.strip()
+        ]
+    )
+
     plan = copy.deepcopy(existing)
-    plan, changed = expand_workflow_plan_from_text(plan, user_content)
+    _, changed_latest = expand_workflow_plan_from_text(plan, user_content, activate=True)
+    _, changed_full = expand_workflow_plan_from_text(plan, combined, activate=False)
+    changed = changed_latest or changed_full
     if changed:
         await _persist_workflow_plan(message_repo, session_id, plan)
     return plan, changed
@@ -449,6 +478,7 @@ async def enrich_metadata_with_workflow_plan(
     plan, _changed = await sync_workflow_plan_with_message(
         message_repo, session_id, latest
     )
+    plan = await get_workflow_plan_from_session(message_repo, session_id) or plan
     if plan is None or len(plan.get("nodes") or []) < 2:
         return metadata
 
@@ -579,16 +609,47 @@ def _node_by_id(plan: dict[str, Any], node_id: str) -> dict[str, Any] | None:
     return None
 
 
-def _advance_active_node(plan: dict[str, Any]) -> None:
-    for node in _nodes_in_display_order(plan):
-        if node.get("id") == "hotel" and not _booking_gate_open(plan):
-            continue
-        if node.get("status") == "pending":
+_FINISHED_NODE_STATUSES = ("submitted", "completed", "cancelled")
+_CONFIRM_ACTION_TEXT = re.compile(r"^确认开始办理|^确认并开始")
+
+
+def _is_confirm_action_text(text: str) -> bool:
+    return bool(_CONFIRM_ACTION_TEXT.search((text or "").strip()))
+
+
+def _node_awaiting_confirm(plan: dict[str, Any], node: dict[str, Any]) -> bool:
+    """尚未完成信息确认的节点才可作为自动推进的下一站。"""
+    if node.get("id") == "hotel" and not _booking_gate_open(plan):
+        return False
+    if node.get("status") in _FINISHED_NODE_STATUSES:
+        return False
+    if node.get("task_id"):
+        return False
+    return node.get("status") in ("pending", "running", None)
+
+
+def _advance_active_node(
+    plan: dict[str, Any],
+    *,
+    after_node_id: str | None = None,
+) -> None:
+    """将焦点推进到「刚完成节点之后」的下一个待确认节点，不回头选已办节点。"""
+    ordered = _nodes_in_display_order(plan)
+    start = 0
+    if after_node_id:
+        for idx, node in enumerate(ordered):
+            if node.get("id") == after_node_id:
+                start = idx + 1
+                break
+
+    search = ordered[start:]
+    for node in search:
+        if _node_awaiting_confirm(plan, node) and node.get("status") == "pending":
             node["status"] = "running"
             plan["active_node_id"] = node.get("id")
             return
-    for node in _nodes_in_display_order(plan):
-        if node.get("status") == "running":
+    for node in search:
+        if _node_awaiting_confirm(plan, node) and node.get("status") == "running":
             plan["active_node_id"] = node.get("id")
             return
     plan["active_node_id"] = None
@@ -601,8 +662,12 @@ def _ensure_valid_active_node(plan: dict[str, Any]) -> None:
     if not active_id:
         return
     node = _node_by_id(plan, active_id)
-    if node and node.get("status") in ("completed", "submitted", "cancelled"):
+    if node is None:
         _advance_active_node(plan)
+        _enforce_booking_before_hotel(plan)
+        return
+    if node.get("status") in _FINISHED_NODE_STATUSES:
+        _advance_active_node(plan, after_node_id=str(active_id))
     _enforce_booking_before_hotel(plan)
 
 
@@ -729,7 +794,7 @@ async def mark_plan_node_cancelled(
         node["status"] = "cancelled"
         changed = True
     if plan.get("active_node_id") == node_id:
-        _advance_active_node(plan)
+        _advance_active_node(plan, after_node_id=node_id)
         changed = True
 
     _normalize_plan_nodes(plan)
@@ -797,12 +862,20 @@ async def update_plan_for_task(
         changed = True
 
     if status == "submitted":
-        _prepare_parallel_after_submit(plan)
+        submitted_id = next(
+            (str(node.get("id")) for node in matched if node.get("id")),
+            None,
+        )
+        _prepare_parallel_after_submit(plan, after_node_id=submitted_id)
         changed = True
 
     if status == "cancelled":
-        if plan.get("active_node_id") in {node.get("id") for node in matched}:
-            _advance_active_node(plan)
+        cancelled_ids = {node.get("id") for node in matched}
+        if plan.get("active_node_id") in cancelled_ids:
+            _advance_active_node(
+                plan,
+                after_node_id=str(plan.get("active_node_id") or ""),
+            )
             changed = True
 
     if status == "running" and any(
@@ -817,11 +890,14 @@ async def update_plan_for_task(
             plan.get("active_node_id") == node.get("id") for node in matched
         )
         if matched_active:
-            _advance_active_node(plan)
+            _advance_active_node(plan, after_node_id=str(prev_active or ""))
         else:
             active = _node_by_id(plan, plan.get("active_node_id") or "")
             if active and active.get("status") == "completed":
-                _advance_active_node(plan)
+                _advance_active_node(
+                    plan,
+                    after_node_id=str(plan.get("active_node_id") or ""),
+                )
         if plan.get("active_node_id") != prev_active:
             changed = True
 
@@ -859,7 +935,7 @@ def _missing_slots_for_node(node_id: str, user_messages) -> list[str]:
         return info_collect_missing_slots(plan)
 
     if node_id in ("room", "gn_meeting"):
-        plan = build_meeting_plan(user_messages)
+        plan = meeting_plan_for_node(build_meeting_plan(user_messages), node_id)
         missing = meeting_missing_slots(plan)
         if has_meeting_schedule(plan):
             missing = [slot for slot in missing if slot != "会议日期或时段"]
@@ -1384,7 +1460,12 @@ async def build_next_node_guidance(
     label = str(node.get("label") or _LABELS.get(active_id, active_id))
     ctx = await load_session_context(message_repo, session_id)
     missing = _missing_slots_for_node(active_id, ctx.user_messages)
-    meeting_plan = build_meeting_plan(ctx.user_messages) if active_id == "room" else None
+    meeting_plan = None
+    if active_id in ("room", "gn_meeting"):
+        synced = sync_meeting_plan_with_workflow_nodes(
+            build_meeting_plan(ctx.user_messages), plan
+        )
+        meeting_plan = meeting_plan_for_node(synced, active_id)
     submitted_labels = [
         str(item.get("label") or "")
         for item in nodes
@@ -1394,25 +1475,37 @@ async def build_next_node_guidance(
     lines = [
         "**接下来请办理：**" + label,
         "",
+        "已根据对话内容自查并预填，请核对下方确认卡片，可直接修改后确认。",
+        "",
     ]
     if submitted_labels:
         waiting = "、".join(label for label in submitted_labels if label)
-        lines.append(f"「{waiting}」仍在 OA 审批中，您可并行准备本节点信息。")
+        lines.append(f"「{waiting}」信息已确认，您可并行准备本节点信息。")
         lines.append("")
+    leave_plan = build_leave_plan(ctx.user_messages) if active_id == "leave" else None
+
     if missing:
         lines.append(f"还需要您补充：**{'、'.join(missing)}**")
         lines.append("")
-        if active_id == "room" and meeting_plan and has_meeting_schedule(meeting_plan):
-            lines.append("会议时间已从对话中识别，请在下方卡片中核对时段并确认。")
+        if active_id in ("room", "gn_meeting") and meeting_plan and can_present_meeting_confirm(meeting_plan):
+            lines.append("会议信息已从对话中识别，请在下方卡片中核对主题、时间与参会人员并确认。")
+        elif active_id == "leave" and leave_plan is not None:
+            lines.append("请假信息已从对话中识别，请在下方卡片中核对日期、时段与事由并确认。")
         else:
             lines.append(_NODE_GUIDANCE.get(active_id, "请补充相关信息后继续办理。"))
     else:
-        if active_id == "room" and meeting_plan and has_meeting_schedule(meeting_plan):
-            lines.append("会议时间已从对话中识别，请在下方卡片中核对并确认。")
+        if active_id in ("room", "gn_meeting") and meeting_plan and can_present_meeting_confirm(meeting_plan):
+            lines.append("会议信息已从对话中识别，请在下方卡片中核对主题、时间与参会人员并确认。")
+        elif active_id == "leave" and leave_plan is not None:
+            lines.append("请假信息已从对话中识别，请在下方卡片中核对并确认。")
         else:
             lines.append("相关信息已从对话中识别，您可以直接说「开始办理」或补充细节后继续。")
         hint = _NODE_GUIDANCE.get(active_id)
-        if hint and not (active_id == "room" and meeting_plan and has_meeting_schedule(meeting_plan)):
+        if hint and not (
+            active_id in ("room", "gn_meeting")
+            and meeting_plan
+            and can_present_meeting_confirm(meeting_plan)
+        ) and active_id != "leave":
             lines.append("")
             lines.append(hint)
 
@@ -1443,10 +1536,24 @@ async def build_next_node_guidance(
         next_node_meta["destination"] = travel_plan.destination or ""
         next_node_meta["transport_type"] = resolve_transport_booking_type(combined, travel_plan)
 
-    metadata = {
+    metadata: dict[str, Any] = {
         "workflow_next_node": next_node_meta,
         "workflow_plan": plan,
     }
+    if active_id == "leave" and leave_plan is not None:
+        metadata.update(build_leave_plan_confirm_metadata(leave_plan))
+        next_node_meta["missing_slots"] = []
+    elif (
+        active_id in ("room", "gn_meeting")
+        and meeting_plan is not None
+        and can_present_meeting_confirm(meeting_plan)
+    ):
+        metadata.update(
+            build_meeting_plan_confirm_metadata(
+                meeting_plan, confirm_node_id=active_id
+            )
+        )
+        next_node_meta["missing_slots"] = []
     return "\n".join(lines), metadata
 
 

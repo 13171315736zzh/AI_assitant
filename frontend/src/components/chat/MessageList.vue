@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { nextTick, onMounted, ref, watch } from 'vue'
 import type {
   BookingSelectionMeta,
   Message,
@@ -13,8 +13,8 @@ import type {
   LeavePlanConfirmMeta,
   InfoCollectPlanConfirmMeta,
   WorkflowNextNode,
-  GnMeetingResultMeta,
-  RoomBookingResultMeta,
+  WorkflowCompletedNode,
+  WorkflowDrawerRequest,
   WorkflowCancelConfirmMeta,
   MeetingCancelSelectionMeta,
   RoomCancelConfirmMeta,
@@ -30,24 +30,23 @@ import EmailPlanConfirmPanel from '@/components/chat/EmailPlanConfirmPanel.vue'
 import TravelPlanConfirmPanel from '@/components/chat/TravelPlanConfirmPanel.vue'
 import LeavePlanConfirmPanel from '@/components/chat/LeavePlanConfirmPanel.vue'
 import MemoryCollectConfirmPanel from '@/components/chat/MemoryCollectConfirmPanel.vue'
-import GnMeetingResultPanel from '@/components/chat/GnMeetingResultPanel.vue'
-import RoomBookingResultPanel from '@/components/chat/RoomBookingResultPanel.vue'
 import WorkflowCancelConfirmPanel from '@/components/chat/WorkflowCancelConfirmPanel.vue'
 import MeetingCancelSelectionPanel from '@/components/chat/MeetingCancelSelectionPanel.vue'
-import WorkflowSessionSummaryPanel from '@/components/chat/WorkflowSessionSummaryPanel.vue'
+import WorkflowCompletedSummary from '@/components/chat/WorkflowCompletedSummary.vue'
 import WelcomeQuickActions from '@/components/chat/WelcomeQuickActions.vue'
-import { openOaBookingByKind } from '@/utils/oaBooking'
-import { extractWorkflowPlan, nodeActivationPrompt } from '@/utils/workflowPlan'
-import type { WorkflowSessionSummary } from '@/types'
+import { nodeActivationPrompt } from '@/utils/workflowPlan'
+import { filterDrawerItems } from '@/utils/taskOaStatus'
 
 const props = defineProps<{
   messages: Message[]
   workflowSubmitting?: boolean
   quickActionsDisabled?: boolean
+  activeTaskId?: string | null
 }>()
 
 const emit = defineEmits<{
   openTask: [taskId: string]
+  openDrawer: [request: WorkflowDrawerRequest]
   openSource: [source: MessageSource]
   confirmBooking: [payload: { messageId: string; flight_no?: string; train_no?: string; hotel_name?: string; drive?: boolean }]
   confirmRoom: [payload: { messageId: string; room: string }]
@@ -84,6 +83,7 @@ const emit = defineEmits<{
     date_hint?: string
     start_hint?: string
     end_hint?: string
+    confirm_node_id?: string
   }]
   confirmLeavePlan: [payload: {
     messageId: string
@@ -118,7 +118,7 @@ async function scrollToLatest(behavior: ScrollBehavior = 'smooth') {
 async function scrollToMessage(
   messageId: string,
   behavior: ScrollBehavior = 'smooth',
-  options?: { highlightInteractive?: boolean },
+  options?: { highlightInteractive?: boolean; highlightOa?: boolean },
 ) {
   await nextTick()
   const el = containerRef.value?.querySelector(
@@ -126,10 +126,14 @@ async function scrollToMessage(
   ) as HTMLElement | null
   if (!el) return false
 
-  if (options?.highlightInteractive) {
+  if (options?.highlightInteractive || options?.highlightOa) {
     const zone = el.querySelector('.interactive-zone') as HTMLElement | null
     const planConfirm = el.querySelector('.plan-confirm') as HTMLElement | null
-    const focusEl = zone ?? planConfirm
+    const oaEntry = el.querySelector('.oa-entry') as HTMLElement | null
+    const advance = el.querySelector('.workflow-advance') as HTMLElement | null
+    const focusEl = options.highlightOa
+      ? (oaEntry ?? advance ?? zone ?? planConfirm)
+      : (zone ?? planConfirm ?? oaEntry ?? advance)
     if (focusEl) {
       focusEl.scrollIntoView({ behavior, block: 'center' })
       focusedInteractiveId.value = messageId
@@ -180,16 +184,23 @@ onMounted(() => {
   if (props.messages.length) scrollToLatest('instant')
 })
 
+function completedNode(msg: Message): WorkflowCompletedNode | null {
+  const raw = msg.metadata?.workflow_completed_node as WorkflowCompletedNode | undefined
+  if (!raw?.node_id) return null
+  return raw
+}
+
 function taskMeta(msg: Message) {
   const m = msg.metadata ?? {}
-  const percent = (m.progress_percent as number) ?? 50
+  const completed = completedNode(msg)
+  const percent = completed?.progress_percent ?? (m.progress_percent as number) ?? 50
   const status = (m.status as string) ?? ''
   return {
-    title: (m.task_title as string) ?? '任务进行中',
-    progress: (m.progress as string) ?? '',
+    title: completed?.task_title || (m.task_title as string) || '任务进行中',
+    progress: completed?.progress || (m.progress as string) || '',
     percent,
-    stepsDesc: (m.steps_desc as string) ?? '',
-    taskId: (m.task_id as string) ?? '',
+    stepsDesc: completed?.steps_desc || (m.steps_desc as string) || '',
+    taskId: completed?.task_id || (m.task_id as string) || '',
     completed: status === 'completed' || percent >= 100,
   }
 }
@@ -197,29 +208,6 @@ function taskMeta(msg: Message) {
 function relatedTasks(msg: Message): RelatedTaskMeta[] {
   const raw = msg.metadata?.related_tasks as RelatedTaskMeta[] | undefined
   return Array.isArray(raw) ? raw : []
-}
-
-function roomBookingResult(msg: Message): RoomBookingResultMeta | null {
-  const raw = msg.metadata?.room_booking_result as RoomBookingResultMeta | undefined
-  return raw?.room_name ? raw : null
-}
-
-const suppressGnMeetingCard = computed(() => {
-  const plan = extractWorkflowPlan(props.messages)
-  const gnNode = plan?.nodes.find((node) => node.id === 'gn_meeting')
-  const roomNode = plan?.nodes.find((node) => node.id === 'room')
-  if (gnNode && roomNode) {
-    return gnNode.status === 'completed' && roomNode.status === 'completed'
-  }
-  return props.messages.some((msg) => roomBookingResult(msg) !== null)
-})
-
-function gnMeetingResult(msg: Message): GnMeetingResultMeta | null {
-  const raw = msg.metadata?.gn_meeting_result as GnMeetingResultMeta | undefined
-  if (!raw?.meeting_link) return null
-  if (msg.metadata?.oa_completion) return raw
-  if (suppressGnMeetingCard.value) return null
-  return raw
 }
 
 function taskCardMetaFromRelated(task: RelatedTaskMeta) {
@@ -230,38 +218,109 @@ function taskCardMetaFromRelated(task: RelatedTaskMeta) {
     stepsDesc: task.steps_desc,
     taskId: task.task_id,
     completed: (task.progress_percent ?? 0) >= 100,
-    bookingKind: task.booking_kind ?? null,
   }
 }
 
-function sessionSummary(msg: Message): WorkflowSessionSummary | null {
-  const raw = msg.metadata?.workflow_session_summary as WorkflowSessionSummary | undefined
-  return raw?.text ? raw : null
+function relatedTaskHint(task: RelatedTaskMeta): string {
+  if (task.meeting_kind === 'gn') return '点击打开划窗查看步骤，确认后前往 OA 提交国能会议'
+  if (task.meeting_kind === 'room') return '点击打开划窗查看步骤，确认后前往 OA 提交会议室预约'
+  if (task.booking_kind === 'transport' || task.booking_kind === 'hotel') {
+    return '点击打开划窗查看步骤，确认后前往 OA'
+  }
+  return '点击打开划窗查看步骤，确认后前往 OA'
+}
+
+function oaEntryHint(msg: Message): string {
+  const completed = completedNode(msg)
+  if (completed?.oa_label) return `${completed.oa_label}：先打开划窗核对步骤，再确认跳转`
+  if (msg.metadata?.meeting_kind === 'gn') return '点击打开划窗查看步骤，确认后前往 OA 提交国能会议'
+  if (msg.metadata?.meeting_kind === 'room') return '点击打开划窗查看步骤，确认后前往 OA 提交会议室预约'
+  return '点击打开划窗查看步骤，确认后前往 OA'
+}
+
+function oaEntryTaskId(msg: Message): string {
+  return completedNode(msg)?.task_id || taskMeta(msg).taskId || ''
+}
+
+function hasOaEntry(msg: Message): boolean {
+  return relatedTasks(msg).length > 0 || Boolean(oaEntryTaskId(msg))
+}
+
+function oaEntryNodeId(msg?: Message, task?: RelatedTaskMeta): string | undefined {
+  if (task?.meeting_kind === 'gn') return 'gn_meeting'
+  if (task?.meeting_kind === 'room') return 'room'
+  if (task?.booking_kind === 'transport') return 'booking'
+  if (task?.booking_kind === 'hotel') return 'hotel'
+  if (!msg) return undefined
+  const completed = completedNode(msg)
+  if (completed?.node_id) return completed.node_id
+  if (msg.metadata?.meeting_kind === 'gn') return 'gn_meeting'
+  if (msg.metadata?.meeting_kind === 'room') return 'room'
+  return undefined
+}
+
+function openOaDrawer(taskId?: string | null, nodeId?: string | null) {
+  if (!taskId && !nodeId) return
+  emit('openDrawer', { taskId, nodeId, force: true })
 }
 
 function handleRelatedTaskClick(task: RelatedTaskMeta) {
-  if (task.booking_kind === 'transport' || task.booking_kind === 'hotel') {
-    const opened = openOaBookingByKind(task.task_id, task.booking_kind)
-    if (!opened) {
-      alert('无法打开新窗口，请检查浏览器是否拦截弹窗。')
-    }
-    return
-  }
-  emit('openTask', task.task_id)
+  openOaDrawer(task.task_id, oaEntryNodeId(undefined, task))
 }
 
 function handleSingleTaskClick(msg: Message) {
-  const meta = msg.metadata ?? {}
-  const kind = meta.booking_kind as 'transport' | 'hotel' | undefined
-  const taskId = meta.task_id as string | undefined
-  if (taskId && (kind === 'transport' || kind === 'hotel')) {
-    const opened = openOaBookingByKind(taskId, kind)
-    if (!opened) {
-      alert('无法打开新窗口，请检查浏览器是否拦截弹窗。')
+  openOaDrawer(oaEntryTaskId(msg), oaEntryNodeId(msg))
+}
+
+function confirmDrawerRequest(msg: Message): WorkflowDrawerRequest | null {
+  const meeting = meetingPlanConfirm(msg)
+  if (meeting) {
+    const nodeId = meeting.confirm_node_id
+      || (meeting.plan_mode === 'gn_only' || meeting.needs_gn_meeting ? 'gn_meeting' : 'room')
+    return {
+      nodeId,
+      title: meeting.title,
+      items: filterDrawerItems(meeting.items, nodeId),
     }
-    return
   }
-  emit('openTask', taskMeta(msg).taskId)
+  const leave = leavePlanConfirm(msg)
+  if (leave) {
+    return { nodeId: 'leave', title: leave.title, items: leave.items }
+  }
+  const travel = travelPlanConfirm(msg)
+  if (travel) {
+    return { nodeId: 'travel', title: travel.title, items: travel.items }
+  }
+  const email = emailPlanConfirm(msg)
+  if (email) {
+    return { nodeId: 'email', title: email.title, items: email.items }
+  }
+  const workpackage = workpackagePlanConfirm(msg)
+  if (workpackage) {
+    return { nodeId: 'workpackage', title: workpackage.title, items: workpackage.items }
+  }
+  return null
+}
+
+function handleConfirmPanelFocus(msg: Message) {
+  const request = confirmDrawerRequest(msg)
+  if (request) emit('openDrawer', request)
+}
+
+function handleCompletedSummaryClick(msg: Message) {
+  const completed = completedNode(msg)
+  if (!completed) return
+  emit('openDrawer', {
+    taskId: completed.task_id,
+    nodeId: completed.node_id,
+    title: `${completed.node_label}任务详情`,
+    items: completed.items,
+    force: true,
+  })
+}
+
+function hasContinuationCard(msg: Message): boolean {
+  return Boolean(completedNode(msg) || relatedTasks(msg).length || msg.message_type === 'task')
 }
 
 function sources(msg: Message): MessageSource[] {
@@ -464,9 +523,34 @@ function workflowCancelConfirm(msg: Message): WorkflowCancelConfirmMeta | null {
   }
 }
 
+function hasPendingPlanForNextNode(msg: Message): boolean {
+  const next = workflowNextNode(msg)
+  if (!next?.node_id) return false
+  if (next.node_id === 'leave') {
+    return leavePlanConfirm(msg)?.status === 'pending'
+  }
+  if (next.node_id === 'room' || next.node_id === 'gn_meeting') {
+    return meetingPlanConfirm(msg)?.status === 'pending'
+  }
+  if (next.node_id === 'travel' || next.node_id === 'email') {
+    return Boolean(travelPlanConfirm(msg) || emailPlanConfirm(msg))
+  }
+  if (next.node_id === 'workpackage') {
+    return Boolean(workpackagePlanConfirm(msg) || workpackageConfirm(msg))
+  }
+  if (next.node_id === 'info_collect') {
+    return infoCollectPlanConfirm(msg)?.status === 'pending'
+  }
+  return false
+}
+
 function handleNextNodeClick(msg: Message) {
   const nextNode = workflowNextNode(msg)
-  if (!nextNode?.node_id || props.quickActionsDisabled) return
+  if (!nextNode?.node_id) return
+  if (props.quickActionsDisabled) {
+    window.alert('正在处理上一条消息，请稍候…')
+    return
+  }
   emit('quickStart', nodeActivationPrompt(nextNode.node_id, nextNode.label))
 }
 
@@ -491,7 +575,9 @@ function handleSwitchToFlightBooking() {
         msg.role,
         {
           'welcome-row': msg.metadata?.is_welcome,
-          'wide-form-row': travelPlanConfirm(msg) || emailPlanConfirm(msg),
+          'wide-form-row': travelPlanConfirm(msg) || emailPlanConfirm(msg)
+            || meetingPlanConfirm(msg) || leavePlanConfirm(msg)
+            || hasContinuationCard(msg),
           focused: focusedMessageId === msg.id,
         },
       ]"
@@ -521,67 +607,6 @@ function handleSwitchToFlightBooking() {
         />
         <template v-else>{{ msg.content }}</template>
 
-        <div
-          v-if="gnMeetingResult(msg) || roomBookingResult(msg) || workflowNextNode(msg)"
-          class="completion-flow"
-        >
-          <GnMeetingResultPanel
-            v-if="gnMeetingResult(msg)"
-            :result="gnMeetingResult(msg)!"
-          />
-
-          <RoomBookingResultPanel
-            v-if="roomBookingResult(msg)"
-            :result="roomBookingResult(msg)!"
-          />
-
-          <div
-            v-if="workflowNextNode(msg)"
-            class="next-node-block"
-          >
-            <button
-              type="button"
-              class="next-node-body"
-              :disabled="quickActionsDisabled"
-              @click="handleNextNodeClick(msg)"
-            >
-              <div class="next-node-label">下一办理节点</div>
-              <div v-if="workflowNextNode(msg)?.label" class="next-node-title">
-                {{ workflowNextNode(msg)?.label }}
-              </div>
-              <div
-                v-if="(workflowNextNode(msg)?.missing_slots?.length ?? 0) > 0"
-                class="next-node-slots"
-              >
-                待补充：
-                <span
-                  v-for="slot in workflowNextNode(msg)?.missing_slots"
-                  :key="slot"
-                  class="slot-chip"
-                >
-                  {{ slot }}
-                </span>
-              </div>
-            </button>
-            <div
-              v-if="workflowNextNode(msg)?.node_id === 'booking' && workflowNextNode(msg)?.origin"
-              class="next-node-route"
-            >
-              <span class="route-label">出发地</span>
-              <span class="route-value">{{ workflowNextNode(msg)?.origin }}</span>
-              <button
-                v-if="showBookingSwitchToFlight(workflowNextNode(msg))"
-                type="button"
-                class="btn-switch-flight"
-                :disabled="quickActionsDisabled"
-                @click.stop="handleSwitchToFlightBooking"
-              >
-                改订机票
-              </button>
-            </div>
-          </div>
-        </div>
-
         <MeetingCancelSelectionPanel
           v-if="meetingCancelSelection(msg)"
           :class="{ 'interactive-focus': focusedInteractiveId === msg.id }"
@@ -604,9 +629,100 @@ function handleSwitchToFlightBooking() {
           })"
         />
 
+        <div
+          v-if="hasContinuationCard(msg) || travelPlanConfirm(msg) || emailPlanConfirm(msg)
+            || workflowNextNode(msg)
+            || (hasInteractivePicker(msg) && !workflowCancelConfirm(msg) && !meetingCancelSelection(msg))"
+          class="workflow-advance"
+          :class="{
+            'interactive-focus': focusedInteractiveId === msg.id,
+            'continuation-card': hasContinuationCard(msg),
+          }"
+        >
+        <p v-if="completedNode(msg)" class="continuation-label">上一节点 · 已确认信息</p>
+        <WorkflowCompletedSummary
+          v-if="completedNode(msg)"
+          class="completed-summary-trigger"
+          :node="completedNode(msg)!"
+          @click="handleCompletedSummaryClick(msg)"
+        />
+
+        <p v-if="hasOaEntry(msg)" class="continuation-label">前往 OA</p>
+        <template v-if="relatedTasks(msg).length">
+          <div class="task-card-grid">
+            <button
+              v-for="task in relatedTasks(msg)"
+              :key="task.task_id"
+              type="button"
+              class="task-card task-card-compact oa-entry"
+              :class="{
+                completed: taskCardMetaFromRelated(task).completed,
+                active: props.activeTaskId === task.task_id,
+              }"
+              @click.stop="handleRelatedTaskClick(task)"
+              @mousedown.stop
+            >
+              <div class="task-card-header">
+                <span class="task-card-title">{{ taskCardMetaFromRelated(task).title }}</span>
+                <span class="task-card-progress">
+                  {{ taskCardMetaFromRelated(task).completed
+                    ? '已完成'
+                    : `${taskCardMetaFromRelated(task).progress} 步骤` }}
+                </span>
+              </div>
+              <div class="progress-bar">
+                <div
+                  class="progress-fill"
+                  :style="{ width: `${taskCardMetaFromRelated(task).percent}%` }"
+                />
+              </div>
+              <div class="task-card-desc">{{ taskCardMetaFromRelated(task).stepsDesc }}</div>
+              <div class="task-card-hint">{{ relatedTaskHint(task) }} →</div>
+            </button>
+          </div>
+        </template>
+
+        <button
+          v-else-if="hasOaEntry(msg)"
+          type="button"
+          class="task-card oa-entry"
+          :class="{
+            completed: taskMeta(msg).completed,
+            active: props.activeTaskId === oaEntryTaskId(msg),
+          }"
+          @click.stop="handleSingleTaskClick(msg)"
+          @mousedown.stop
+        >
+          <div class="task-card-header">
+            <span class="task-card-title">{{ completedNode(msg)?.oa_label || taskMeta(msg).title }}</span>
+            <span class="task-card-progress">
+              {{ taskMeta(msg).completed ? '已完成' : `${taskMeta(msg).progress} 步骤` }}
+            </span>
+          </div>
+          <div class="progress-bar">
+            <div
+              class="progress-fill"
+              :style="{ width: `${taskMeta(msg).percent}%` }"
+            />
+          </div>
+          <div class="task-card-desc">{{ taskMeta(msg).stepsDesc }}</div>
+          <div class="task-card-hint">{{ oaEntryHint(msg) }} →</div>
+        </button>
+
+        <p
+          v-if="hasContinuationCard(msg) && (hasPendingPlanForNextNode(msg) || workflowNextNode(msg))"
+          class="continuation-label"
+        >
+          下一节点 · 请核对并确认
+        </p>
+
+        <div
+          v-if="travelPlanConfirm(msg) || emailPlanConfirm(msg)"
+          class="node-drawer-trigger"
+          @mousedown="handleConfirmPanelFocus(msg)"
+        >
         <TravelPlanConfirmPanel
           v-if="travelPlanConfirm(msg)"
-          :class="{ 'interactive-focus': focusedInteractiveId === msg.id }"
           :confirm="travelPlanConfirm(msg)!"
           :submitting="workflowSubmitting"
           @update-draft="emit('updateCardDraft', {
@@ -634,11 +750,12 @@ function handleSwitchToFlightBooking() {
             ...$event,
           })"
         />
+        </div>
 
         <div
           v-if="hasInteractivePicker(msg) && !travelPlanConfirm(msg) && !emailPlanConfirm(msg)"
           class="interactive-zone"
-          :class="{ 'interactive-focus': focusedInteractiveId === msg.id }"
+          @mousedown="handleConfirmPanelFocus(msg)"
         >
         <TravelBookingPicker
           v-if="bookingSelection(msg)"
@@ -658,6 +775,7 @@ function handleSwitchToFlightBooking() {
         <MeetingPlanConfirmPanel
           v-if="meetingPlanConfirm(msg)"
           :confirm="meetingPlanConfirm(msg)!"
+          :message-id="msg.id"
           :submitting="workflowSubmitting"
           @update-draft="emit('updateCardDraft', {
             messageId: msg.id,
@@ -725,66 +843,39 @@ function handleSwitchToFlightBooking() {
         />
         </div>
 
-        <template v-if="relatedTasks(msg).length">
-          <div class="task-card-grid">
-            <div
-              v-for="task in relatedTasks(msg)"
-              :key="task.task_id"
-              class="task-card task-card-compact"
-              :class="{ completed: taskCardMetaFromRelated(task).completed }"
-              @click="handleRelatedTaskClick(task)"
-            >
-              <div class="task-card-header">
-                <span class="task-card-title">{{ taskCardMetaFromRelated(task).title }}</span>
-                <span class="task-card-progress">
-                  {{ taskCardMetaFromRelated(task).completed
-                    ? '已完成'
-                    : `${taskCardMetaFromRelated(task).progress} 步骤` }}
-                </span>
-              </div>
-              <div class="progress-bar">
-                <div
-                  class="progress-fill"
-                  :style="{ width: `${taskCardMetaFromRelated(task).percent}%` }"
-                />
-              </div>
-              <div class="task-card-desc">{{ taskCardMetaFromRelated(task).stepsDesc }}</div>
-              <div v-if="task.booking_kind" class="task-card-hint">点击前往 OA 预订 →</div>
-            </div>
-          </div>
-        </template>
-
         <div
-          v-else-if="msg.message_type === 'task'"
-          class="task-card"
-          :class="{ completed: taskMeta(msg).completed }"
-          @click="handleSingleTaskClick(msg)"
+          v-if="workflowNextNode(msg) && !hasPendingPlanForNextNode(msg)"
+          class="next-node-block"
         >
-          <div class="task-card-header">
-            <span class="task-card-title">{{ taskMeta(msg).title }}</span>
-            <span class="task-card-progress">
-              {{ taskMeta(msg).completed ? '已完成' : `${taskMeta(msg).progress} 步骤` }}
-            </span>
-          </div>
-          <div class="progress-bar">
-            <div
-              class="progress-fill"
-              :style="{ width: `${taskMeta(msg).percent}%` }"
-            />
-          </div>
-          <div class="task-card-desc">{{ taskMeta(msg).stepsDesc }}</div>
-          <div
-            v-if="msg.metadata?.booking_kind"
-            class="task-card-hint"
+          <button
+            type="button"
+            class="next-node-body"
+            :disabled="quickActionsDisabled"
+            @click="handleNextNodeClick(msg)"
           >
-            点击前往 OA 预订 →
+            <div class="next-node-label">下一办理节点</div>
+            <div v-if="workflowNextNode(msg)?.label" class="next-node-title">
+              {{ workflowNextNode(msg)?.label }}
+            </div>
+          </button>
+          <div
+            v-if="workflowNextNode(msg)?.node_id === 'booking' && workflowNextNode(msg)?.origin"
+            class="next-node-route"
+          >
+            <span class="route-label">出发地</span>
+            <span class="route-value">{{ workflowNextNode(msg)?.origin }}</span>
+            <button
+              v-if="showBookingSwitchToFlight(workflowNextNode(msg))"
+              type="button"
+              class="btn-switch-flight"
+              :disabled="quickActionsDisabled"
+              @click.stop="handleSwitchToFlightBooking"
+            >
+              改订机票
+            </button>
           </div>
         </div>
-
-        <WorkflowSessionSummaryPanel
-          v-if="sessionSummary(msg)"
-          :summary="sessionSummary(msg)!"
-        />
+        </div>
 
         <div v-if="policyReminders(msg).length" class="reminder-block">
           <div class="reminder-label">差旅规定提醒</div>
@@ -975,6 +1066,8 @@ function handleSwitchToFlightBooking() {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   cursor: pointer;
+  font: inherit;
+  color: inherit;
   transition: border-color 0.15s;
 }
 
@@ -1001,6 +1094,11 @@ function handleSwitchToFlightBooking() {
 
 .task-card:hover {
   border-color: var(--primary);
+}
+
+.task-card.active {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 16%, transparent);
 }
 
 .task-card.completed {
@@ -1208,6 +1306,54 @@ function handleSwitchToFlightBooking() {
 
 .interactive-zone {
   margin-top: 4px;
+}
+
+.workflow-advance {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.continuation-card {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg) 70%, var(--surface));
+}
+
+.continuation-label {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.oa-entry {
+  width: 100%;
+  text-align: left;
+}
+
+.completed-summary-trigger {
+  cursor: pointer;
+}
+
+.node-drawer-trigger {
+  cursor: pointer;
+}
+
+.continuation-card .task-card,
+.continuation-card .interactive-zone,
+.continuation-card .next-node-block {
+  margin-top: 0;
+}
+
+.workflow-advance.interactive-focus {
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.25);
+  animation: interactive-pulse 1.2s ease-in-out 2;
 }
 
 .source-block {

@@ -15,6 +15,7 @@ from src.models.session import (
     RoomCancelRequest,
     WorkflowCancelConfirm,
     WorkflowCancelRequest,
+    WorkflowNodeActivate,
     RoomSelectionConfirm,
     SessionCreate,
     SessionUpdate,
@@ -319,6 +320,8 @@ async def confirm_meeting_plan(
             key: value
             for key, value in {
                 "subject": body.subject,
+                "meeting_name": body.meeting_name,
+                "meeting_topic": body.meeting_topic,
                 "room": body.room or body.selected_room,
                 "selected_room": body.selected_room or body.room,
                 "room_flexible": body.room_flexible,
@@ -327,6 +330,7 @@ async def confirm_meeting_plan(
                 "date_hint": body.date_hint,
                 "start_hint": body.start_hint,
                 "end_hint": body.end_hint,
+                "confirm_node_id": body.confirm_node_id,
             }.items()
             if value is not None
         },
@@ -336,6 +340,7 @@ async def confirm_meeting_plan(
         session_id,
         supplementary_content=body.supplementary_content,
         card_draft=card_draft if card_draft["payload"] else None,
+        confirm_node_id=body.confirm_node_id,
     )
     if result is None:
         return JSONResponse(
@@ -449,6 +454,27 @@ async def request_workflow_cancel_confirm(
             "session_title": session_title,
         }
     )
+
+
+@router.post("/{session_id}/activate-workflow-node")
+async def activate_workflow_node(
+    session_id: str,
+    body: WorkflowNodeActivate,
+    current_user: UserPublic = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    svc = _service(db)
+    assistant_message = await svc.activate_workflow_node(
+        current_user.id,
+        session_id,
+        body.node_id,
+    )
+    if assistant_message is None:
+        return JSONResponse(
+            status_code=400,
+            content=error("无法激活该办理节点", code=400),
+        )
+    return success({"assistant_message": assistant_message.model_dump()})
 
 
 @router.post("/{session_id}/workflow-cancel-confirm")

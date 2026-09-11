@@ -151,49 +151,15 @@ async def _sync_related_task_cards(
 
 def _build_completion_content(category: str, task_title: str, receipt_id: str | None) -> str:
     copy = _COMPLETION_COPY.get(category, {"title": "业务办理", "chain": "相关审批节点"})
-    receipt_line = f"\n- 回执单号：**{receipt_id}**" if receipt_id else ""
     if category == "gn_meeting":
-        return "\n".join(
-            [
-                f"✅ **{task_title or copy['title']}已创建**",
-                "",
-                "会议已在国能会议系统中创建成功，请在下方卡片中复制会议链接与密码。",
-                receipt_line,
-            ]
-        )
+        return f"{task_title or copy['title']}已创建。"
     if category == "meeting":
-        return "\n".join(
-            [
-                f"✅ **{task_title or copy['title']}已完成**",
-                "",
-                f"OA 审批已通过（{copy['chain']}）。预约详情见下方卡片。{receipt_line}",
-            ]
-        )
+        return f"{task_title or copy['title']}已完成。"
     if category == "transport_book":
-        return "\n".join(
-            [
-                f"✅ **{task_title or copy['title']}已预定**",
-                "",
-                f"交通预订已完成，票务信息已同步至智能办公助手。{receipt_line}",
-            ]
-        )
+        return f"{task_title or copy['title']}已预定。"
     if category == "hotel_book":
-        return "\n".join(
-            [
-                f"✅ **{task_title or copy['title']}已预定**",
-                "",
-                f"酒店预订已完成，入住信息已同步至智能办公助手。{receipt_line}",
-            ]
-        )
-    return "\n".join(
-        [
-            f"✅ **{task_title or copy['title']}已完成**",
-            "",
-            f"OA 审批已通过（{copy['chain']}），办理结果已同步至智能办公助手。{receipt_line}",
-            "",
-            "您可在「我的任务」中查看详情，或继续在本对话中办理其他事项。",
-        ]
-    )
+        return f"{task_title or copy['title']}已预定。"
+    return f"{task_title or copy['title']}已完成。"
 
 
 def _field_str(fields: dict | None, key: str, default: str = "—") -> str:

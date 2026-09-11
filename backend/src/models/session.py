@@ -129,6 +129,8 @@ class EmailPlanConfirm(PlanConfirm):
 
 class MeetingPlanConfirm(PlanConfirm):
     subject: str | None = Field(default=None, max_length=128)
+    meeting_name: str | None = Field(default=None, max_length=128)
+    meeting_topic: str | None = Field(default=None, max_length=128)
     room: str | None = Field(default=None, max_length=32)
     selected_room: str | None = Field(default=None, max_length=32)
     room_flexible: bool | None = None
@@ -137,6 +139,11 @@ class MeetingPlanConfirm(PlanConfirm):
     date_hint: str | None = Field(default=None, max_length=64)
     start_hint: str | None = Field(default=None, max_length=16)
     end_hint: str | None = Field(default=None, max_length=16)
+    confirm_node_id: str | None = Field(default=None, max_length=32)
+
+
+class WorkflowNodeActivate(BaseModel):
+    node_id: str = Field(..., min_length=1, max_length=32)
 
 
 class SendMessageData(BaseModel):

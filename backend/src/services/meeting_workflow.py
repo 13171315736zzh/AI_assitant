@@ -17,6 +17,7 @@ from src.agent.meeting_workflow import (
     build_meeting_plan,
     build_meeting_plan_confirm_content,
     build_meeting_plan_confirm_metadata,
+    enrich_meeting_plan_schedule,
     build_room_execution_summary,
     build_room_cancel_confirm_content,
     build_room_cancel_confirm_metadata,
@@ -25,6 +26,9 @@ from src.agent.meeting_workflow import (
     build_room_task_metadata,
     build_task_metadata,
     can_present_meeting_confirm,
+    meeting_plan_for_node,
+    resolve_meeting_focus_node,
+    sync_meeting_plan_with_workflow_nodes,
     has_meeting_schedule,
     is_meeting_plan_update,
     is_meeting_workflow_intent,
@@ -42,6 +46,7 @@ from src.agent.workflow_confirm import (
     mark_meta_superseded,
     try_reopen_confirmed_plan,
 )
+from src.agent.workflow_advance import append_workflow_guidance_after_node
 from src.agent.workflow_plan import (
     _node_by_id,
     activated_plan_node,
@@ -68,6 +73,21 @@ def _new_task_id() -> str:
     return f"task_{secrets.token_hex(4)}"
 
 
+def _needs_fresh_meeting_confirm(
+    wf_plan: dict | None,
+    activated_node: str | None,
+) -> bool:
+    """同一会话内分步办理国能会/会议室时，未建任务前需重新展示确认卡。"""
+    if not wf_plan or activated_node not in ("gn_meeting", "room"):
+        return False
+    node = _node_by_id(wf_plan, activated_node)
+    if not isinstance(node, dict):
+        return False
+    if node.get("status") in ("completed", "cancelled", "submitted"):
+        return False
+    return not bool(node.get("task_id"))
+
+
 def _card_payload(card_draft: dict | None, meta_key: str) -> dict:
     if not card_draft:
         return {}
@@ -75,6 +95,82 @@ def _card_payload(card_draft: dict | None, meta_key: str) -> dict:
         return {}
     payload = card_draft.get("payload")
     return dict(payload) if isinstance(payload, dict) else {}
+
+
+async def _get_pending_meeting_confirm(
+    message_repo,
+    session_id: str,
+    confirm_node_id: str | None = None,
+):
+    """优先取指定节点的待确认会议卡，避免会议室确认误打到国能会卡片。"""
+    messages = await message_repo.list_recent_for_context(session_id, limit=24)
+    fallback = (None, None)
+    for record in reversed(messages):
+        if record.role != "assistant":
+            continue
+        item = (record.metadata_json or {}).get("meeting_plan_confirm")
+        if not isinstance(item, dict) or item.get("status") != "pending":
+            continue
+        if confirm_node_id and item.get("confirm_node_id") == confirm_node_id:
+            return record, item
+        if fallback[0] is None:
+            fallback = (record, item)
+    return fallback
+
+
+async def _is_meeting_node_confirmed(
+    message_repo,
+    session_id: str,
+    node_id: str | None,
+) -> bool:
+    """国能会 / 会议室分步确认：仅判断当前节点是否已确认。"""
+    if not node_id:
+        return await is_meta_confirmed(message_repo, session_id, "meeting_plan_confirm")
+    messages = await message_repo.list_recent_for_context(session_id, limit=24)
+    for record in reversed(messages):
+        if record.role != "assistant":
+            continue
+        item = (record.metadata_json or {}).get("meeting_plan_confirm")
+        if not isinstance(item, dict):
+            continue
+        if item.get("confirm_node_id") != node_id:
+            continue
+        if item.get("status") == "confirmed":
+            return True
+        if item.get("status") == "pending":
+            return False
+    return False
+
+
+def _resolve_focus_node(
+    wf_plan: dict | None,
+    user_content: str,
+    pending: dict | None = None,
+    *,
+    requested_node_id: str | None = None,
+) -> str | None:
+    if requested_node_id in ("gn_meeting", "room"):
+        return requested_node_id
+    if isinstance(pending, dict) and pending.get("confirm_node_id") in (
+        "gn_meeting",
+        "room",
+    ):
+        return str(pending["confirm_node_id"])
+    return resolve_meeting_focus_node(
+        wf_plan,
+        activated_node=activated_plan_node(user_content, wf_plan),
+    )
+
+
+def _build_present_plan(
+    plan: MeetingPlan,
+    wf_plan: dict | None,
+    focus_node: str | None,
+) -> MeetingPlan:
+    synced = sync_meeting_plan_with_workflow_nodes(plan, wf_plan)
+    if focus_node in ("gn_meeting", "room"):
+        return meeting_plan_for_node(synced, focus_node)
+    return synced
 
 
 class MeetingWorkflowService:
@@ -102,24 +198,26 @@ class MeetingWorkflowService:
             self.message_repo, session_id, "meeting_plan_confirm"
         )
         has_pending_plan_flag = has_pending_plan(pending_plan)
-        plan_confirmed = await is_meta_confirmed(
-            self.message_repo, session_id, "meeting_plan_confirm"
-        )
         plan_update = is_meeting_plan_update(user_content)
 
         wf_plan = await get_workflow_plan_from_session(self.message_repo, session_id)
 
-        parallel_plan = is_parallel_workflow_plan(wf_plan)
-        activated_meeting = activated_plan_node(user_content, wf_plan) in (
-            "room",
-            "gn_meeting",
+        activated_node = activated_plan_node(user_content, wf_plan)
+        focus_node = _resolve_focus_node(wf_plan, user_content, pending_plan)
+        node_confirmed = await _is_meeting_node_confirmed(
+            self.message_repo, session_id, focus_node
         )
+        active_meeting = focus_node in ("gn_meeting", "room")
+
+        parallel_plan = is_parallel_workflow_plan(wf_plan)
+        activated_meeting = activated_node in ("room", "gn_meeting")
         if parallel_plan and not should_service_handle_activation(
             "meeting", user_content, wf_plan
         ):
             if not (
-                (has_pending_plan_flag and plan_update)
-                or (plan_confirmed and plan_update)
+                active_meeting
+                or (has_pending_plan_flag and plan_update)
+                or (node_confirmed and plan_update)
                 or is_room_cancel_intent(user_content)
             ):
                 return None
@@ -132,17 +230,23 @@ class MeetingWorkflowService:
         )
         if not meeting_intent:
             if not (
-                (has_pending_plan_flag and plan_update)
-                or (plan_confirmed and plan_update)
+                active_meeting
+                or (has_pending_plan_flag and plan_update)
+                or (node_confirmed and plan_update)
                 or activated_meeting
                 or is_room_cancel_intent(user_content)
             ):
                 return None
 
         plan = build_meeting_plan(ctx.user_messages)
+        plan = await enrich_meeting_plan_schedule(
+            plan,
+            ctx.latest_user_text or user_content,
+        )
         card_payload = _card_payload(card_draft, "meeting_plan_confirm")
         plan = apply_meeting_plan_draft(plan, card_payload)
-        missing = missing_slots(plan)
+        present_plan = _build_present_plan(plan, wf_plan, focus_node)
+        missing = missing_slots(present_plan)
 
         reopened = await try_reopen_confirmed_plan(
             self.message_repo,
@@ -152,8 +256,10 @@ class MeetingWorkflowService:
             is_update=is_meeting_plan_update,
             can_present=can_present_meeting_confirm,
             build_content=build_meeting_plan_confirm_content,
-            build_metadata=build_meeting_plan_confirm_metadata,
-            plan=plan,
+            build_metadata=lambda p: build_meeting_plan_confirm_metadata(
+                p, confirm_node_id=focus_node
+            ),
+            plan=present_plan,
             pending_plan_msg=pending_plan_msg,
             has_pending_plan_flag=has_pending_plan_flag,
             supersede_keys=["room_selection"],
@@ -167,32 +273,54 @@ class MeetingWorkflowService:
             await self.db.flush()
 
         pending_msg, pending_sel = await self._get_pending_room_selection(session_id)
-        if plan_confirmed and pending_msg and pending_sel:
+        if (
+            focus_node == "room"
+            and node_confirmed
+            and pending_msg
+            and pending_sel
+        ):
             return (
                 "👇 请在下方勾选可用会议室，完成后点击「确认预约」。",
                 "text",
                 {"interactive": True, "room_selection": pending_sel},
             )
 
-        if not plan_confirmed:
-            if can_present_meeting_confirm(plan):
+        fresh_confirm = _needs_fresh_meeting_confirm(wf_plan, focus_node)
+        focus_node_obj = _node_by_id(wf_plan, focus_node) if wf_plan and focus_node else None
+        if focus_node_obj and focus_node_obj.get("task_id"):
+            return None
+
+        if not node_confirmed or fresh_confirm:
+            if can_present_meeting_confirm(present_plan):
                 content = build_meeting_plan_confirm_content(
-                    plan, updated=has_pending_plan_flag
+                    present_plan, updated=has_pending_plan_flag or fresh_confirm
                 )
-                metadata = build_meeting_plan_confirm_metadata(plan)
+                metadata = build_meeting_plan_confirm_metadata(
+                    present_plan, confirm_node_id=focus_node
+                )
                 return content, "text", metadata
-            if missing and not has_pending_plan_flag:
+            if missing:
                 return (
-                    self._missing_slots_prompt(missing, plan),
+                    self._missing_slots_prompt(missing, present_plan),
+                    "text",
+                    None,
+                )
+            if active_meeting:
+                label = "国能会议" if focus_node == "gn_meeting" else "会议室"
+                return (
+                    f"请补充{label}的主题、时间与参会人员，例如："
+                    f"「下周一上午10点开神农会议国能会，参会张明和李经理」。",
                     "text",
                     None,
                 )
             return None
 
-        if not is_ready_to_execute(plan):
+        if not is_ready_to_execute(present_plan):
             return None
 
-        return await self._execute_confirmed_plan(user_id, session_id, plan)
+        return await self._execute_confirmed_plan(
+            user_id, session_id, present_plan, focus_node=focus_node
+        )
 
     async def confirm_meeting_plan(
         self,
@@ -201,22 +329,36 @@ class MeetingWorkflowService:
         *,
         supplementary_content: str | None = None,
         card_draft: dict | None = None,
+        confirm_node_id: str | None = None,
     ) -> tuple[str, str, dict] | None:
-        pending_msg, pending = await get_pending_meta(
-            self.message_repo, session_id, "meeting_plan_confirm"
+        requested_node = None
+        draft_payload = _card_payload(card_draft, "meeting_plan_confirm")
+        raw_node = confirm_node_id or draft_payload.get("confirm_node_id")
+        if raw_node in ("gn_meeting", "room"):
+            requested_node = str(raw_node)
+
+        pending_msg, pending = await _get_pending_meeting_confirm(
+            self.message_repo, session_id, requested_node
         )
         if pending_msg is None or pending is None:
             return None
 
+        wf_plan = await get_workflow_plan_from_session(self.message_repo, session_id)
+        focus_node = _resolve_focus_node(
+            wf_plan, "", pending, requested_node_id=requested_node
+        )
+
         ctx = await load_session_context(self.message_repo, session_id)
         user_messages = extend_user_messages(ctx.user_messages, supplementary_content)
         plan = build_meeting_plan(user_messages)
-        draft = _card_payload(card_draft, "meeting_plan_confirm")
+        draft = draft_payload
         if not draft and pending:
             draft = {
                 key: pending.get(key)
                 for key in (
                     "subject",
+                    "meeting_name",
+                    "meeting_topic",
                     "selected_room",
                     "room",
                     "room_flexible",
@@ -229,61 +371,84 @@ class MeetingWorkflowService:
                 if pending.get(key) is not None
             }
         plan = apply_meeting_plan_draft(plan, draft)
-        if not is_ready_to_execute(plan):
+        present_plan = _build_present_plan(plan, wf_plan, focus_node)
+        if not is_ready_to_execute(present_plan):
             return None
 
         mark_meta_confirmed(pending_msg, "meeting_plan_confirm")
         await self.db.flush()
 
-        return await self._execute_confirmed_plan(user_id, session_id, plan)
+        result = await self._execute_confirmed_plan(
+            user_id, session_id, present_plan, focus_node=focus_node
+        )
+        if not result or focus_node not in ("gn_meeting", "room"):
+            return result
+        if (result[2] or {}).get("room_selection"):
+            return result
+
+        return await append_workflow_guidance_after_node(
+            self.message_repo, session_id, focus_node, result
+        )
 
     async def _execute_confirmed_plan(
         self,
         user_id: int,
         session_id: str,
         plan: MeetingPlan,
+        *,
+        focus_node: str | None = None,
     ) -> tuple[str, str, dict] | None:
+        if focus_node == "gn_meeting":
+            return await self._create_gn_meeting_task(user_id, session_id, plan)
+
+        if focus_node == "room":
+            return await self._execute_room_plan(user_id, session_id, plan)
+
         if plan.needs_gn_meeting and not plan.needs_room_booking:
             return await self._create_gn_meeting_task(user_id, session_id, plan)
 
         if plan.needs_room_booking:
-            if plan.room_flexible:
-                availability = await query_available_projection_rooms(
-                    date_hint=plan.date_hint,
-                    start_hint=plan.start_hint,
-                    end_hint=plan.end_hint,
-                    equipment_pref=plan.equipment_pref or "投影",
-                    raw_text=plan.raw_goal,
-                )
-                pub = availability.to_public_dict()
-                content = build_room_selection_content(plan, pub)
-                metadata = build_room_selection_metadata(plan, pub)
-                return content, "text", metadata
+            return await self._execute_room_plan(user_id, session_id, plan)
 
-            availability = await query_room_availability(
-                plan.room or "236",
+        return None
+
+    async def _execute_room_plan(
+        self,
+        user_id: int,
+        session_id: str,
+        plan: MeetingPlan,
+    ) -> tuple[str, str, dict] | None:
+        if plan.room_flexible:
+            availability = await query_available_projection_rooms(
                 date_hint=plan.date_hint,
                 start_hint=plan.start_hint,
                 end_hint=plan.end_hint,
+                equipment_pref=plan.equipment_pref or "投影",
                 raw_text=plan.raw_goal,
             )
             pub = availability.to_public_dict()
+            content = build_room_selection_content(plan, pub)
+            metadata = build_room_selection_metadata(plan, pub)
+            return content, "text", metadata
 
-            if not pub["available"]:
-                content = build_room_selection_content(plan, pub)
-                metadata = build_room_selection_metadata(plan, pub)
-                return content, "text", metadata
+        availability = await query_room_availability(
+            plan.room or "236",
+            date_hint=plan.date_hint,
+            start_hint=plan.start_hint,
+            end_hint=plan.end_hint,
+            raw_text=plan.raw_goal,
+        )
+        pub = availability.to_public_dict()
 
-            room = pub["requested_room"]
-            if plan.needs_gn_meeting:
-                return await self._create_combined_tasks(
-                    user_id, session_id, plan, room, pub
-                )
-            return await self._create_room_booking_task(
-                user_id, session_id, plan, room, pub
-            )
+        if not pub["available"]:
+            content = build_room_selection_content(plan, pub)
+            metadata = build_room_selection_metadata(plan, pub)
+            return content, "text", metadata
 
-        return None
+        room = pub["requested_room"]
+        return await self._create_room_booking_task(
+            user_id, session_id, plan, room, pub
+        )
 
     async def confirm_room_selection(
         self,
@@ -299,10 +464,11 @@ class MeetingWorkflowService:
         if not any(o.get("room") == room for o in options):
             return None
 
+        wf_plan = await get_workflow_plan_from_session(self.message_repo, session_id)
         ctx = await load_session_context(self.message_repo, session_id)
-        plan = build_meeting_plan(ctx.user_messages)
-        plan.needs_gn_meeting = bool(pending.get("needs_gn_meeting"))
-        plan.needs_room_booking = True
+        plan = _build_present_plan(
+            build_meeting_plan(ctx.user_messages), wf_plan, "room"
+        )
         if not is_ready_to_execute(plan):
             return None
 
@@ -314,12 +480,13 @@ class MeetingWorkflowService:
             "start_time": pending.get("start_time", ""),
             "end_time": pending.get("end_time", ""),
         }
-        if plan.needs_gn_meeting:
-            return await self._create_combined_tasks(
-                user_id, session_id, plan, room, availability
-            )
-        return await self._create_room_booking_task(
+        result = await self._create_room_booking_task(
             user_id, session_id, plan, room, availability
+        )
+        if not result:
+            return None
+        return await append_workflow_guidance_after_node(
+            self.message_repo, session_id, "room", result
         )
 
     async def _create_gn_meeting_task(
@@ -331,6 +498,13 @@ class MeetingWorkflowService:
         task_id = _new_task_id()
         schedule = resolve_meeting_datetime(plan)
         time_label = schedule["time_label"]
+        params = {
+            "subject": plan.subject or "",
+            "attendees": plan.attendees or "",
+            "time": time_label,
+            "start_time": schedule["start_time"],
+            "end_time": schedule["end_time"],
+        }
         steps = [
             {
                 "step_id": 1,
@@ -338,7 +512,7 @@ class MeetingWorkflowService:
                 "tool": "gn_meeting_book",
                 "status": "running",
                 "depends_on": [],
-                "params": {"subject": plan.subject or ""},
+                "params": params,
                 "result": None,
             },
             {
@@ -384,7 +558,7 @@ class MeetingWorkflowService:
                     step["status"] = "completed"
                     step["result"] = {"form_id": gn_form.form_id}
 
-        await self.task_repo.update(task, steps_json=steps, current_step=1)
+        await self.task_repo.update(task, steps_json=steps, current_step=2)
         await link_task_to_plan(
             self.message_repo, session_id, task_id, node_id="gn_meeting"
         )
@@ -466,9 +640,9 @@ class MeetingWorkflowService:
                     step["status"] = "completed"
                     step["result"] = {"form_id": meeting_form.form_id}
 
-        await self.task_repo.update(task, steps_json=steps, current_step=2)
+        await self.task_repo.update(task, steps_json=steps, current_step=3)
         await link_task_to_plan(
-            self.message_repo, session_id, task_id, category="meeting"
+            self.message_repo, session_id, task_id, node_id="room"
         )
 
         content = build_room_execution_summary(plan, task_id, room, time_label)

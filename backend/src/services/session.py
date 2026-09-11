@@ -40,6 +40,19 @@ def _confirm_user_content(default: str, supplementary: str | None) -> str:
     return extra or default
 
 
+_NODE_ACTIVATION_TEXT: dict[str, str] = {
+    "gn_meeting": "国能会议",
+    "email": "写邮件",
+    "room": "会议室",
+    "travel": "差旅单",
+    "booking": "订车票",
+    "hotel": "订酒店",
+    "workpackage": "填工时",
+    "leave": "请假",
+    "info_collect": "填信息",
+}
+
+
 class SessionService:
     def __init__(
         self,
@@ -861,6 +874,7 @@ class SessionService:
         *,
         supplementary_content: str | None = None,
         card_draft: dict | None = None,
+        confirm_node_id: str | None = None,
     ) -> tuple[MessagePublic, MessagePublic, str] | None | str:
         record = await self._prepare_send(user_id, session_id)
         if record is None:
@@ -878,6 +892,7 @@ class SessionService:
             session_id,
             supplementary_content=supplementary_content,
             card_draft=card_draft,
+            confirm_node_id=confirm_node_id,
         )
         if not workflow:
             return None
@@ -1026,3 +1041,114 @@ class SessionService:
             _to_message_public(assistant_msg),
             session_title,
         )
+
+    async def activate_workflow_node(
+        self,
+        user_id: int,
+        session_id: str,
+        node_id: str,
+    ) -> MessagePublic | None:
+        """点击右侧办理节点：激活节点并展示自查后的确认卡片（不插入用户消息）。"""
+        from src.agent.session_context import load_session_context
+        from src.agent.workflow_plan import (
+            _LABELS,
+            _missing_slots_for_node,
+            _node_by_id,
+            _persist_workflow_plan,
+            activate_plan_node,
+            get_workflow_plan_from_session,
+            service_for_node,
+        )
+
+        record = await self.session_repo.get_by_id(session_id, user_id)
+        if record is None or record.status == "ended":
+            return None
+
+        plan = await get_workflow_plan_from_session(self.message_repo, session_id)
+        if plan is None:
+            return None
+        node = _node_by_id(plan, node_id)
+        if node is None:
+            return None
+        if node.get("status") in ("completed", "cancelled", "submitted"):
+            return None
+
+        activate_plan_node(plan, node_id)
+        await _persist_workflow_plan(self.message_repo, session_id, plan)
+
+        activation_text = _NODE_ACTIVATION_TEXT.get(
+            node_id,
+            str(node.get("label") or _LABELS.get(node_id, node_id)),
+        )
+
+        service_key = service_for_node(node_id)
+        db = self.session_repo.db
+        workflow = None
+        if service_key == "meeting":
+            workflow = await MeetingWorkflowService(db).try_execute(
+                user_id, session_id, activation_text
+            )
+        elif service_key == "leave":
+            workflow = await LeaveWorkflowService(db).try_execute(
+                user_id, session_id, activation_text
+            )
+        elif service_key == "travel":
+            workflow = await TravelWorkflowService(db).try_execute(
+                user_id, session_id, activation_text
+            )
+        elif service_key == "workpackage":
+            workflow = await WorkpackageWorkflowService(db).try_execute(
+                user_id, session_id, activation_text
+            )
+        elif service_key == "info_collect":
+            workflow = await InfoCollectWorkflowService(db).try_execute(
+                user_id, session_id, activation_text
+            )
+
+        if not workflow:
+            ctx = await load_session_context(self.message_repo, session_id)
+            missing = _missing_slots_for_node(node_id, ctx.user_messages)
+            label = str(node.get("label") or _LABELS.get(node_id, node_id))
+            lines = [
+                f"**{label}**",
+                "",
+                "已根据对话内容自查，请补充以下信息后继续办理。",
+                "",
+            ]
+            if missing:
+                lines.append(f"仍需：**{'、'.join(missing)}**")
+            else:
+                lines.append("请说明具体需求，例如涉及的时间、地点与事项。")
+            workflow = (
+                "\n".join(lines),
+                "text",
+                {
+                    "workflow_plan": plan,
+                    "workflow_next_node": {
+                        "node_id": node_id,
+                        "label": label,
+                        "missing_slots": missing,
+                    },
+                },
+            )
+
+        _, confirmed_position, _travel_staff_level = await self._prepare_agent_context(
+            user_id, session_id, activation_text
+        )
+        reply_content, message_type, metadata = await self.agent_service.finalize_outgoing(
+            session_id,
+            activation_text,
+            workflow[0],
+            workflow[1],
+            workflow[2],
+            confirmed_position,
+        )
+        assistant_msg = await self._create_assistant_message(
+            session_id,
+            reply_content,
+            message_type,
+            metadata=metadata,
+        )
+        record.message_count += 1
+        await self.session_repo.update(record)
+        return _to_message_public(assistant_msg)

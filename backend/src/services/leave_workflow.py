@@ -23,6 +23,7 @@ from src.agent.leave_workflow import (
     missing_slots,
 )
 from src.agent.session_context import extend_user_messages, has_pending_plan, load_session_context
+from src.agent.workflow_advance import append_workflow_guidance_after_node
 from src.agent.workflow_plan import link_task_to_plan
 from src.agent.workflow_queue import get_pending_workflow_queue
 from src.agent.workflow_confirm import (
@@ -126,6 +127,10 @@ class LeaveWorkflowService:
         plan = apply_leave_plan_draft(plan, _leave_card_payload(card_draft))
         missing = missing_slots(plan)
         if missing and not has_pending_plan_flag:
+            if is_leave_workflow_intent(ctx.combined_text) or activated_leave:
+                content = build_leave_plan_confirm_content(plan)
+                metadata = build_leave_plan_confirm_metadata(plan)
+                return content, "text", metadata
             return (
                 self._missing_slots_prompt(missing),
                 "text",
@@ -232,7 +237,10 @@ class LeaveWorkflowService:
         mark_meta_confirmed(pending_msg, "leave_plan_confirm")
         await self.db.flush()
 
-        return await self._create_task_reply(user_id, session_id, plan)
+        result = await self._create_task_reply(user_id, session_id, plan)
+        return await append_workflow_guidance_after_node(
+            self.message_repo, session_id, "leave", result
+        )
 
     async def _create_task_reply(
         self,

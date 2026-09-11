@@ -80,7 +80,7 @@ function handleNodeClick(node: WorkflowPlanNode) {
 </script>
 
 <template>
-  <div class="workflow-rail-wrap">
+  <div class="workflow-rail-wrap" :class="{ 'is-collapsed': !expanded }">
     <aside class="workflow-rail" :class="{ collapsed: !expanded }">
       <template v-if="expanded">
         <header class="rail-head">
@@ -99,9 +99,7 @@ function handleNodeClick(node: WorkflowPlanNode) {
               type="button"
               class="node-button"
               :class="nodeClass(node)"
-              :title="node.status === 'cancelled'
-                ? `${nodeStatusLabel(node.status)} · 已取消`
-                : `${nodeStatusLabel(node.status)} · ${node.status === 'completed' ? '点击查看或修改' : '点击办理、修改或取消'}`"
+              :title="`${nodeStatusLabel(node.status)} · 点击查看相关对话`"
               @click="handleNodeClick(node)"
             >
               <span class="node-label">{{ nodeDisplayLabel(node) }}</span>
@@ -140,28 +138,17 @@ function handleNodeClick(node: WorkflowPlanNode) {
         </button>
       </template>
 
-      <div v-else class="rail-collapsed-wrap">
-        <button
-          type="button"
-          class="rail-expand-btn"
-          title="展开办理节点"
-          @click="emit('toggle')"
-        >
-          <strong>办理节点</strong>
-          <span class="rail-progress">{{ completedCount }}/{{ plan.nodes.length }}</span>
-          <span class="chevron" aria-hidden="true">▼</span>
-        </button>
-        <button
-          type="button"
-          class="btn-copy-progress collapsed-copy"
-          :class="{ copied }"
-          :disabled="!hasStartedNodes"
-          title="复制已开始节点的状态与关键信息"
-          @click="copyProgressSummary"
-        >
-          {{ copied ? '已复制' : '复制进度' }}
-        </button>
-      </div>
+      <button
+        v-else
+        type="button"
+        class="rail-collapsed-chip"
+        title="展开办理节点"
+        @click="emit('toggle')"
+      >
+        <span class="chip-label">办理节点</span>
+        <span class="chip-progress">{{ completedCount }}/{{ plan.nodes.length }}</span>
+        <span class="chip-chevron" aria-hidden="true">▲</span>
+      </button>
     </aside>
   </div>
 </template>
@@ -169,10 +156,21 @@ function handleNodeClick(node: WorkflowPlanNode) {
 <style scoped>
 .workflow-rail-wrap {
   position: absolute;
-  top: 72px;
-  right: 12px;
+  top: 64px;
+  right: 16px;
+  bottom: auto;
   z-index: 20;
   pointer-events: none;
+  transition:
+    top 0.28s ease,
+    bottom 0.28s ease,
+    right 0.28s ease;
+}
+
+.workflow-rail-wrap.is-collapsed {
+  top: auto;
+  bottom: 132px;
+  right: 16px;
 }
 
 .workflow-rail {
@@ -183,11 +181,16 @@ function handleNodeClick(node: WorkflowPlanNode) {
   background: color-mix(in srgb, var(--surface) 92%, #fff);
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
   overflow: hidden;
+  transition:
+    width 0.28s ease,
+    border-radius 0.28s ease,
+    box-shadow 0.28s ease;
 }
 
 .workflow-rail.collapsed {
-  width: 72px;
-  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.1);
+  width: auto;
+  border-radius: 999px;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.14);
 }
 
 .rail-head {
@@ -239,23 +242,10 @@ function handleNodeClick(node: WorkflowPlanNode) {
   background: #f0fdf4;
 }
 
-.btn-copy-progress.collapsed-copy {
-  display: block;
-  width: calc(100% - 16px);
-  margin: 0 8px 8px;
-  padding: 4px 6px;
-  font-size: 10px;
-}
-
 .rail-copy-wrap {
   margin: 12px 10px 0;
   padding-top: 10px;
   border-top: 1px solid var(--border);
-}
-
-.rail-collapsed-wrap {
-  display: flex;
-  flex-direction: column;
 }
 
 .rail-progress {
@@ -420,38 +410,37 @@ function handleNodeClick(node: WorkflowPlanNode) {
   line-height: 1;
 }
 
-.rail-expand-btn {
-  display: flex;
-  flex-direction: column;
+.rail-collapsed-chip {
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: 4px;
-  width: 100%;
-  padding: 12px 8px;
+  gap: 8px;
+  padding: 10px 14px;
   border: none;
   background: transparent;
   color: var(--text);
   cursor: pointer;
+  white-space: nowrap;
   transition: background 0.15s;
 }
 
-.rail-expand-btn:hover {
+.rail-collapsed-chip:hover {
   background: color-mix(in srgb, var(--primary) 6%, transparent);
 }
 
-.rail-expand-btn strong {
-  font-size: 12px;
+.chip-label {
+  font-size: 13px;
   font-weight: 600;
+  color: var(--text);
 }
 
-.rail-expand-btn .rail-progress {
-  font-size: 11px;
+.chip-progress {
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
-.rail-expand-btn .chevron {
-  margin-top: 2px;
+.chip-chevron {
   font-size: 10px;
   line-height: 1;
-  color: var(--text-secondary);
+  color: var(--primary);
 }
 </style>

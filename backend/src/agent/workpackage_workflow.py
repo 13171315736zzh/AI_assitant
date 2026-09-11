@@ -771,27 +771,10 @@ def build_workpackage_confirm_metadata(plan: WorkpackagePlan, fill_plan: dict) -
 
 
 def build_execution_summary(plan: WorkpackagePlan, task_id: str, fill_plan: dict) -> str:
-    entries = fill_plan.get("entries") or []
-    lines = [
-        f"已按 **{plan.period_hint or '指定周期'}** 工作日历生成 **{plan.project}** 工时填报：",
-        "",
-        "一、填报明细",
-    ]
-    for entry in entries:
-        hours = entry.get("hours", plan.hours_per_day)
-        lines.append(f"- {entry.get('day_label')}（{entry.get('day_date')}）：{hours:g} 小时")
-    total_hours = sum(e.get("hours", plan.hours_per_day) for e in entries)
-    lines.extend(
-        [
-            f"- 合计：**{total_hours:g} 小时**",
-            "",
-            "二、后续步骤",
-            "- 已生成工包填报表单，请在任务卡片中查看并确认提交",
-            "",
-            "请点击下方任务卡片查看详情。",
-        ]
+    return (
+        f"「{plan.project or '工包'}」工时填报信息已确认。"
+        "请点击中间选项卡打开划窗，核对步骤后前往 OA 提交；下方可继续办理下一事项。"
     )
-    return "\n".join(lines)
 
 
 def build_task_metadata(plan: WorkpackagePlan, task_id: str) -> dict:
@@ -801,4 +784,8 @@ def build_task_metadata(plan: WorkpackagePlan, task_id: str) -> dict:
         "progress": "1/2",
         "progress_percent": 50,
         "steps_desc": "工包填报 · 用户确认",
+        "confirmed_items": [
+            {"label": "项目", "value": plan.project or "—"},
+            {"label": "内容", "value": plan.content or "—"},
+        ],
     }

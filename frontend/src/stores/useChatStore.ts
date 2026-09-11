@@ -7,6 +7,7 @@ import {
   createSession,
   endSession,
   deleteSession,
+  sendMessage,
   sendMessageStream,
   clearMemory,
   confirmBookingSelection,
@@ -20,12 +21,14 @@ import {
   requestWorkflowCancelConfirm,
   confirmWorkflowCancel,
   confirmMeetingCancelSelection,
+  activateWorkflowNode as activateWorkflowNodeApi,
 } from '@/services/sessionService'
 import { fetchWelcomeMessage } from '@/services/settingsService'
 import { DEFAULT_WELCOME_TEXT } from '@/constants/welcomeQuickActions'
 import {
   findPendingWorkflowCard,
   type WorkflowCardDraft,
+  type WorkflowPlanConfirmKey,
 } from '@/utils/workflowCardDraft'
 import {
   applyCancelledNodesToWorkflowPlan,
@@ -92,6 +95,14 @@ export const useChatStore = defineStore('chat', () => {
     const pending = findPendingWorkflowCard(messages.value)
     if (!pending) return null
     return workflowCardDrafts.value[`${pending.messageId}:${pending.metaKey}`] ?? null
+  }
+
+  function getWorkflowCardDraft(
+    messageId: string,
+    metaKey: WorkflowPlanConfirmKey,
+  ): Record<string, unknown> | null {
+    const draft = workflowCardDrafts.value[`${messageId}:${metaKey}`]
+    return draft?.payload ?? null
   }
 
   function takeSupplementaryInput(): string {
@@ -175,6 +186,34 @@ export const useChatStore = defineStore('chat', () => {
     workflowCardDrafts.value = {}
     loading.value = false
     sending.value = false
+    workflowSubmitting.value = false
+  }
+
+  function applySendResult(
+    sessionId: string,
+    tempUserId: string,
+    pendingId: string,
+    data: { user_message: Message; assistant_message: Message; session_title?: string },
+  ) {
+    messages.value = messages.value.filter((m) => m.id !== pendingId)
+    const userIdx = messages.value.findIndex(
+      (m) => m.id === tempUserId || m.id === data.user_message.id,
+    )
+    if (userIdx >= 0) {
+      messages.value[userIdx] = data.user_message
+    } else {
+      messages.value.push(data.user_message)
+    }
+    messages.value.push(data.assistant_message)
+    syncWorkflowPlanFromAssistantMessage(data.assistant_message)
+    const session = sessions.value.find((s) => s.id === sessionId)
+    if (session) {
+      session.message_count += 2
+      session.updated_at = data.assistant_message.created_at
+      if (data.session_title) {
+        session.title = data.session_title
+      }
+    }
   }
 
   async function loadMessages(sessionId: string, options?: { silent?: boolean }) {
@@ -275,9 +314,13 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  async function send(content: string) {
+  async function send(content: string, options?: { useCardDraft?: boolean }) {
     const trimmed = content.trim()
     if (!trimmed) return
+    if (sending.value) {
+      window.alert('正在处理上一条消息，请稍候…')
+      return
+    }
 
     if (!activeSessionId.value) {
       const created = await newSession()
@@ -310,10 +353,25 @@ export const useChatStore = defineStore('chat', () => {
     })
     await nextTick()
 
+    const useCardDraft = options?.useCardDraft !== false
+    const cardDraft = useCardDraft ? getActiveWorkflowCardDraft() : null
+
     sending.value = true
     try {
-      const cardDraft = getActiveWorkflowCardDraft()
-      await sendMessageStream(sessionId, trimmed, {
+      if (!cardDraft) {
+        const res = await sendMessage(sessionId, trimmed)
+        if (res.code !== 200) {
+          messages.value = messages.value.filter(
+            (m) => m.id !== tempUserId && m.id !== pendingId,
+          )
+          alert(res.message || '发送失败，请稍后重试')
+          return
+        }
+        applySendResult(sessionId, tempUserId, pendingId, res.data)
+        return
+      }
+
+      const completed = await sendMessageStream(sessionId, trimmed, {
         onUser: (userMessage) => {
           const idx = messages.value.findIndex((m) => m.id === tempUserId)
           if (idx >= 0) {
@@ -325,11 +383,13 @@ export const useChatStore = defineStore('chat', () => {
           }
         },
         onAck: (ackContent) => {
-          const existing = messages.value.find((m) => m.id === pendingId)
-          if (existing) {
-            existing.content = existing.content
-              ? `${existing.content}\n${ackContent}`
-              : ackContent
+          const idx = messages.value.findIndex((m) => m.id === pendingId)
+          if (idx >= 0) {
+            const existing = messages.value[idx]
+            messages.value[idx] = {
+              ...existing,
+              content: existing.content ? `${existing.content}\n${ackContent}` : ackContent,
+            }
             return
           }
           messages.value.push({
@@ -343,31 +403,26 @@ export const useChatStore = defineStore('chat', () => {
           })
         },
         onDone: (data) => {
-          messages.value = messages.value.filter((m) => m.id !== pendingId)
-          const userIdx = messages.value.findIndex(
-            (m) => m.id === tempUserId || m.id === data.user_message.id,
-          )
-          if (userIdx >= 0) {
-            messages.value[userIdx] = data.user_message
-          } else {
-            messages.value.push(data.user_message)
-          }
-          messages.value.push(data.assistant_message)
-          syncWorkflowPlanFromAssistantMessage(data.assistant_message)
-          const session = sessions.value.find((s) => s.id === sessionId)
-          if (session) {
-            session.message_count += 2
-            session.updated_at = data.assistant_message.created_at
-            if (data.session_title) {
-              session.title = data.session_title
-            }
-          }
+          applySendResult(sessionId, tempUserId, pendingId, data)
         },
         onError: (message) => {
           messages.value = messages.value.filter((m) => m.id !== pendingId)
           alert(message)
         },
       }, { cardDraft })
+
+      if (!completed) {
+        messages.value = messages.value.filter(
+          (m) => m.id !== pendingId && m.id !== tempUserId,
+        )
+        await loadMessages(sessionId, { silent: true })
+      }
+    } catch {
+      messages.value = messages.value.filter(
+        (m) => m.id !== pendingId && m.id !== tempUserId,
+      )
+      await loadMessages(sessionId, { silent: true })
+      alert('发送失败，请稍后重试')
     } finally {
       sending.value = false
     }
@@ -500,6 +555,8 @@ export const useChatStore = defineStore('chat', () => {
     messageId: string
     supplementary_content?: string
     subject?: string
+    meeting_name?: string
+    meeting_topic?: string
     room?: string | null
     room_flexible?: boolean
     room_preference?: string
@@ -507,6 +564,7 @@ export const useChatStore = defineStore('chat', () => {
     date_hint?: string
     start_hint?: string
     end_hint?: string
+    confirm_node_id?: string
   }) {
     const inputExtra = takeSupplementaryInput()
     const draft = workflowCardDrafts.value[`${payload.messageId}:meeting_plan_confirm`]
@@ -522,6 +580,8 @@ export const useChatStore = defineStore('chat', () => {
           ? supplementaryParts.join('，')
           : undefined,
         subject: payload.subject ?? (draftPayload.subject as string | undefined),
+        meeting_name: payload.meeting_name ?? (draftPayload.meeting_name as string | undefined),
+        meeting_topic: payload.meeting_topic ?? (draftPayload.meeting_topic as string | undefined),
         room: payload.room ?? (draftPayload.room as string | null | undefined),
         room_flexible: payload.room_flexible ?? (draftPayload.room_flexible as boolean | undefined),
         room_preference: payload.room_preference ?? (draftPayload.room_preference as string | undefined),
@@ -529,6 +589,8 @@ export const useChatStore = defineStore('chat', () => {
         date_hint: payload.date_hint ?? (draftPayload.date_hint as string | undefined),
         start_hint: payload.start_hint ?? (draftPayload.start_hint as string | undefined),
         end_hint: payload.end_hint ?? (draftPayload.end_hint as string | undefined),
+        confirm_node_id: payload.confirm_node_id
+          ?? (draftPayload.confirm_node_id as string | undefined),
       }),
     )
   }
@@ -717,6 +779,31 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  async function activateWorkflowNode(nodeId: string): Promise<Message | null> {
+    if (!activeSessionId.value || sending.value || workflowSubmitting.value) {
+      return null
+    }
+    const sessionId = activeSessionId.value
+    try {
+      const res = await activateWorkflowNodeApi(sessionId, nodeId)
+      if (res.code !== 200 || !res.data?.assistant_message) {
+        alert(res.message || '无法激活该办理节点')
+        return null
+      }
+      appendAssistantMessageIfNew(res.data.assistant_message)
+      syncWorkflowPlanFromAssistantMessage(res.data.assistant_message)
+      const session = sessions.value.find((s) => s.id === sessionId)
+      if (session) {
+        session.message_count += 1
+        session.updated_at = res.data.assistant_message.created_at
+      }
+      return res.data.assistant_message
+    } catch {
+      alert('激活办理节点失败，请稍后重试')
+      return null
+    }
+  }
+
   function syncWorkflowPlanFromAssistantMessage(assistantMessage: Message) {
     const plan = assistantMessage.metadata?.workflow_plan as WorkflowPlan | undefined
     if (!plan?.nodes?.length) return
@@ -815,7 +902,9 @@ export const useChatStore = defineStore('chat', () => {
     activeSession,
     isActiveSessionEnded,
     activeInputDraft,
+    workflowCardDrafts,
     setWorkflowCardDraft,
+    getWorkflowCardDraft,
     loadSessions,
     reset,
     loadMessages,
@@ -838,5 +927,6 @@ export const useChatStore = defineStore('chat', () => {
     requestWorkflowCancelConfirm: requestWorkflowCancelConfirmAction,
     confirmWorkflowCancel: confirmWorkflowCancelAction,
     confirmMeetingCancelSelection: confirmMeetingCancelSelectionAction,
+    activateWorkflowNode,
   }
 })

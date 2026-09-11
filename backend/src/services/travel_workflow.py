@@ -63,6 +63,7 @@ from src.agent.workflow_confirm import (
     mark_meta_confirmed,
     mark_meta_superseded,
 )
+from src.agent.workflow_advance import append_workflow_guidance_after_node
 from src.agent.workflow_plan import (
     activated_plan_node,
     get_outbound_selection_from_plan,
@@ -371,8 +372,12 @@ class TravelWorkflowService:
         mark_meta_confirmed(pending_msg, "travel_plan_confirm")
         await self.db.flush()
 
-        return await self._create_task_reply(
+        node_id = "email" if pending.get("email_only") else "travel"
+        result = await self._create_task_reply(
             user_id, session_id, plan, user, booking={"flights": [], "hotels": []}
+        )
+        return await append_workflow_guidance_after_node(
+            self.message_repo, session_id, node_id, result
         )
 
     async def confirm_booking_selection(
@@ -511,8 +516,12 @@ class TravelWorkflowService:
             "hotels": [selected_hotel] if selected_hotel else [],
         }
 
-        return await self._create_task_reply(
+        node_id = "hotel" if booking_kind == "hotel" else "booking"
+        result = await self._create_task_reply(
             user_id, session_id, plan, user, booking=booking
+        )
+        return await append_workflow_guidance_after_node(
+            self.message_repo, session_id, node_id, result
         )
 
     async def _create_task_reply(

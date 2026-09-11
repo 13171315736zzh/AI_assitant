@@ -109,9 +109,25 @@ def _resolve_period(text: str) -> tuple[str, str]:
     return "全天", "全天"
 
 
+def _leave_focus_text(combined: str) -> str:
+    from src.agent.workflow_queue import split_intent_segments
+
+    for segment in split_intent_segments(combined):
+        if not _LEAVE_INTENT.search(segment):
+            continue
+        match = re.search(r"(.+?请假[^，,]*)", segment)
+        if match:
+            return match.group(1).strip()
+        for sep in ("会议", "开会", "国能会"):
+            if sep in segment:
+                return segment.split(sep, 1)[0].rstrip("，, ")
+        return segment
+    return combined
+
+
 def _parse_dates(combined: str) -> tuple[str | None, str | None, str, str]:
     today = date.today()
-    start_period, end_period = _resolve_period(combined)
+    start_period, end_period = _resolve_period(_leave_focus_text(combined))
 
     range_match = _DATE_RANGE_PATTERN.search(combined)
     if range_match:
@@ -130,6 +146,9 @@ def _parse_dates(combined: str) -> tuple[str | None, str | None, str, str]:
     if re.search(r"前天", combined):
         d = today - timedelta(days=2)
         return _iso(d), _iso(d), start_period, end_period
+
+    if re.search(r"今天|今日", combined):
+        return _iso(today), _iso(today), start_period, end_period
 
     if re.search(r"明天", combined):
         d = today + timedelta(days=1)
@@ -171,6 +190,8 @@ def _parse_leave_type(combined: str) -> str | None:
     if match:
         value = match.group(1)
         return "其他" if value in ("其他假",) else value
+    if re.search(r"感冒|发烧|咳嗽|生病|身体不适|不舒服|医院|受伤", combined):
+        return "病假"
     if "病" in combined and "请假" in combined:
         return "病假"
     if "事" in combined and "请假" in combined:
@@ -181,16 +202,25 @@ def _parse_leave_type(combined: str) -> str | None:
 def _parse_reason(combined: str) -> str | None:
     from src.agent.workflow_queue import split_intent_segments
 
-    patterns = [
+    explicit_patterns = [
         r"(?:原因|事由|因为|由于)[:：是为]?\s*(.{2,120}?)(?:[。！？?]|$)",
+    ]
+    colloquial_patterns = [
+        r"(?:我)?(?:今天|明天|后天|昨日|昨天)?(.+?)(?:需要|要)(?:申请)?请假",
     ]
     for segment in split_intent_segments(combined):
         if not _LEAVE_INTENT.search(segment):
             continue
-        for pattern in patterns:
+        for pattern in explicit_patterns:
             match = re.search(pattern, segment)
             if match:
                 reason = match.group(1).strip("，, ")
+                if reason and len(reason) >= 2:
+                    return reason
+        for pattern in colloquial_patterns:
+            match = re.search(pattern, segment)
+            if match:
+                reason = re.sub(r"^我", "", match.group(1)).strip("，, ")
                 if reason and len(reason) >= 2:
                     return reason
     return None
@@ -276,12 +306,13 @@ def build_leave_plan_confirm_content(plan: LeavePlan, *, updated: bool = False) 
     lines = [intro, ""]
     for item in build_leave_plan_confirm_items(plan):
         lines.append(f"- {item['label']}：{item['value']}")
-    lines.extend(
-        [
-            "",
-            "👇 请补充或确认请假事由，可上传附件（选填），完成后点击「确认提交请假」。",
-        ]
-    )
+    if plan.date_start and plan.reason:
+        footer = "👇 如需调整请在下方卡片中修改，完成后点击「确认提交请假」。"
+    elif plan.date_start:
+        footer = "👇 请在下方卡片中核对请假信息并补充事由，完成后点击「确认提交请假」。"
+    else:
+        footer = "👇 请在下方卡片中填写请假时间与事由，完成后点击「确认提交请假」。"
+    lines.extend(["", footer])
     return "\n".join(lines)
 
 
@@ -305,22 +336,9 @@ def build_leave_plan_confirm_metadata(plan: LeavePlan) -> dict:
 
 
 def build_execution_summary(plan: LeavePlan, task_id: str) -> str:
-    days = compute_leave_days(plan)
-    return "\n".join(
-        [
-            f"已为您启动 **{plan.leave_type or '请假'}** 办理流程：",
-            "",
-            "一、请假信息",
-            f"- 时间：{format_leave_period(plan)}",
-            f"- 天数：**{days:g} 天**",
-            f"- 事由：{plan.reason or '—'}",
-            "",
-            "二、后续步骤",
-            "- 已生成请假申请表单，请在任务卡片中查看并确认提交",
-            "- 确认后将跳转 OA 请假系统完成审批",
-            "",
-            "请点击下方任务卡片查看详情。",
-        ]
+    return (
+        f"「{plan.leave_type or '请假'}」信息已确认。"
+        "请点击中间选项卡打开划窗，核对步骤后前往 OA 提交；下方可继续办理下一事项。"
     )
 
 
@@ -331,6 +349,7 @@ def build_task_metadata(plan: LeavePlan, task_id: str) -> dict:
         "progress": "1/2",
         "progress_percent": 50,
         "steps_desc": "请假申请 · 用户确认",
+        "confirmed_items": build_leave_plan_confirm_items(plan),
     }
 
 

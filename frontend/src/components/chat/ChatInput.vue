@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import {
   speechErrorMessage,
   useSpeechInput,
@@ -20,6 +20,7 @@ const emit = defineEmits<{
 const text = defineModel<string>({ default: '' })
 
 const inputMode = ref<InputMode>('text')
+const textInputRef = ref<HTMLTextAreaElement | null>(null)
 const speechError = ref<string | null>(null)
 const stoppedByCommand = ref(false)
 
@@ -61,8 +62,16 @@ function onKeydown(e: KeyboardEvent) {
   }
 }
 
+async function focusInput() {
+  inputMode.value = 'text'
+  await nextTick()
+  textInputRef.value?.focus()
+}
+
+defineExpose({ focusInput })
+
 function switchMode(mode: InputMode) {
-  if (props.disabled || props.sending) return
+  if (props.disabled) return
   if (mode === inputMode.value) return
   speech.stop()
   speechError.value = null
@@ -71,7 +80,7 @@ function switchMode(mode: InputMode) {
 }
 
 function handleVoiceToggle() {
-  if (props.disabled || props.sending) return
+  if (props.disabled) return
   if (!speech.supported) {
     speechError.value = speechErrorMessage('not-supported')
     return
@@ -102,12 +111,12 @@ watch(
   <div class="input-area">
     <div v-if="disabled" class="ended-hint">当前会话已结束，无法发送新消息</div>
 
-    <div class="mode-bar" :class="{ disabled: disabled || sending }">
+    <div class="mode-bar" :class="{ disabled }">
       <button
         type="button"
         class="mode-btn"
         :class="{ active: inputMode === 'text' }"
-        :disabled="disabled || sending"
+        :disabled="disabled"
         @click="switchMode('text')"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -120,7 +129,7 @@ watch(
         type="button"
         class="mode-btn"
         :class="{ active: inputMode === 'voice' }"
-        :disabled="disabled || sending"
+        :disabled="disabled"
         @click="switchMode('voice')"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -134,16 +143,18 @@ watch(
     <div
       class="input-box"
       :class="{
-        disabled: disabled || sending,
+        disabled,
+        sending,
         listening: inputMode === 'voice' && speech.listening.value,
       }"
     >
       <!-- 文字模式 -->
       <template v-if="inputMode === 'text'">
         <textarea
+          ref="textInputRef"
           v-model="text"
           rows="1"
-          :disabled="disabled || sending"
+          :disabled="disabled"
           placeholder="输入您的需求，例如：下周出差订机票并预约会议室"
           @keydown="onKeydown"
         />
@@ -157,7 +168,7 @@ watch(
               v-model="text"
               rows="2"
               class="voice-textarea"
-              :disabled="disabled || sending"
+              :disabled="disabled"
               placeholder="点击麦克风说话，识别结果会出现在这里，您可直接修改"
               @keydown="onKeydown"
             />
@@ -171,7 +182,7 @@ watch(
             type="button"
             class="btn-mic"
             :class="{ active: speech.listening.value, unsupported: !speech.supported }"
-            :disabled="disabled || sending"
+            :disabled="disabled"
             :aria-label="speech.listening.value ? '停止录音' : '开始录音'"
             :title="speech.supported ? (speech.listening.value ? '点击停止，或说 over' : '点击开始说话') : '当前浏览器不支持'"
             @click="handleVoiceToggle"
@@ -198,6 +209,9 @@ watch(
       </button>
     </div>
 
+    <p v-if="sending && !disabled" class="sending-hint">
+      正在处理回复，您可继续输入；完成后再次点击发送
+    </p>
     <p v-if="speechError" class="speech-error">{{ speechError }}</p>
     <p v-else-if="inputMode === 'voice' && speech.listening.value" class="speech-hint">
       正在识别… 说 <strong>over</strong> 结束录音，或在文本框中直接修改，确认后点发送
@@ -291,6 +305,10 @@ watch(
 
 .input-box.disabled {
   opacity: 0.6;
+}
+
+.input-box.sending:not(.disabled) {
+  border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
 }
 
 .input-box textarea {
@@ -449,6 +467,13 @@ watch(
 .btn-send svg {
   width: 20px;
   height: 20px;
+}
+
+.sending-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
 }
 
 .speech-error {

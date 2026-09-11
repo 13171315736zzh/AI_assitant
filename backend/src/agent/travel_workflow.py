@@ -1430,72 +1430,10 @@ def build_execution_summary(
     booking: dict | None = None,
 ) -> str:
     dest = plan.destination or "目的地"
-    origin = plan.origin or "北京"
-    days = plan.trip_days or 3
-    limit, label = accommodation_standard_other(dest)
-    staff = plan.staff_level or "其他人员"
-    hours = estimate_train_hours(origin, dest)
-    transport_line = f"{origin}→{dest}"
-    if hours and hours >= 6 and staff == "其他人员":
-        transport_line += f"，铁路约 {hours:g} 小时，可按细则乘坐火车软席"
-    elif plan.transport_pref:
-        transport_line += f"，交通方式：{plan.transport_pref}"
-    elif staff == "其他人员":
-        transport_line += "，交通：高铁/飞机（经济舱/二等座）"
-    else:
-        transport_line += f"，交通：按{staff}标准预订"
-
-    lines = [
-        f"差旅单信息已确认，已为您创建「{dest}出差申请」任务，请点击下方任务卡片继续办理。",
-        "",
-        "一、差旅概要",
-        f"- 出发地：{origin}；目的地：{dest}",
-        f"- 开始时间：{_travel_start_label(plan)}；结束时间：{_travel_end_label(plan)}",
-    ]
-    purpose = _extract_travel_purpose(plan)
-    if purpose:
-        lines.append(f"- 出差目的：{purpose}")
-    lines.extend(
-        [
-            f"- 住宿参考：{label} {staff}标准 {limit} 元/人·天",
-            "",
-        ]
+    return (
+        f"「{dest}」差旅单信息已确认。"
+        "请点击中间选项卡打开划窗，核对步骤后前往 OA 提交；下方可继续办理下一事项。"
     )
-
-    step_no = 2
-    flights = (booking or {}).get("flights") or []
-    hotels = (booking or {}).get("hotels") or []
-
-    if flights:
-        section_title = f"{'三' if step_no == 3 else '二'}、交通预订"
-        lines.extend([section_title])
-        chosen = flights[0]
-        lines.append(
-            f"- 已选航班 {chosen.get('flight_no')}（{chosen.get('airline')}）"
-            f" {chosen.get('origin')} → {chosen.get('destination')}"
-        )
-        lines.append(
-            f"  出发 {chosen.get('departure_time')}，到达 {chosen.get('arrival_time')}，"
-            f"{chosen.get('cabin')}，参考价 {chosen.get('price')} 元"
-        )
-        lines.append("")
-        step_no += 1
-
-    if hotels:
-        cn = "二三四五六七八"[min(step_no - 2, 7)] if step_no >= 2 else str(step_no)
-        lines.extend([f"{cn}、酒店预订"])
-        chosen = hotels[0]
-        lines.append(
-            f"- 已选 {chosen.get('name')}，{chosen.get('address')}，"
-            f"{chosen.get('room_type')}，{chosen.get('price_per_night')} 元/晚"
-        )
-        lines.append(
-            f"  入住 {chosen.get('check_in')} 至 {chosen.get('check_out')}"
-        )
-        lines.append("")
-
-    lines.append("请点击下方任务卡片查看各步骤详情、表单预览与确认。")
-    return "\n".join(lines)
 
 
 def build_task_metadata(plan: TravelPlan, task_id: str) -> dict:
@@ -1505,6 +1443,11 @@ def build_task_metadata(plan: TravelPlan, task_id: str) -> dict:
         "progress": "1/2",
         "progress_percent": 50,
         "steps_desc": "差旅申请 · 用户确认",
+        "confirmed_items": [
+            {"label": "出发地", "value": plan.origin or "—"},
+            {"label": "目的地", "value": plan.destination or "—"},
+            {"label": "出差目的", "value": plan.purpose or "—"},
+        ],
     }
 
 
@@ -1547,26 +1490,7 @@ def build_booking_tasks_execution_summary(
     related_metas: list[dict],
 ) -> str:
     dest = plan.destination or "目的地"
-    lines = [
-        f"已确认「{dest}」出行方案，请分别在下方卡片中完成交通与酒店预订：",
-        "",
-    ]
-    for meta in related_metas:
-        kind = meta.get("booking_kind")
-        title = meta.get("task_title") or "预订"
-        if kind == "transport":
-            lines.append(f"- **{title}**：点击卡片进入 OA 交通预订，填写乘客信息并提交确认。")
-        elif kind == "hotel":
-            lines.append(f"- **{title}**：点击卡片进入 OA 酒店预订，填写入住信息并提交确认。")
-        else:
-            lines.append(f"- **{title}**：点击卡片继续办理。")
-    lines.extend(
-        [
-            "",
-            "完成 OA 确认后，卡片进度将自动更新为 2/2。",
-        ]
-    )
-    return "\n".join(lines)
+    return f"「{dest}」出行方案已确认。"
 
 
 def build_email_execution_summary(plan: TravelPlan, task_id: str) -> str:

@@ -283,6 +283,9 @@ function messageMatchesWorkflowNode(
       break
     case 'room':
       if (hasWorkflowCancelMeta(msg, nodeId)) return true
+      if ((meta.workflow_completed_node as { node_id?: string } | undefined)?.node_id === 'room') {
+        return true
+      }
       if (meta.room_selection || meta.room_booking_result) return true
       if ((meta.meeting_plan_confirm as { needs_room_booking?: boolean } | undefined)?.needs_room_booking) {
         return true
@@ -298,6 +301,9 @@ function messageMatchesWorkflowNode(
       break
     case 'gn_meeting':
       if (hasWorkflowCancelMeta(msg, nodeId)) return true
+      if ((meta.workflow_completed_node as { node_id?: string } | undefined)?.node_id === 'gn_meeting') {
+        return true
+      }
       if (meta.gn_meeting_result) return true
       if ((meta.meeting_plan_confirm as { needs_gn_meeting?: boolean } | undefined)?.needs_gn_meeting) {
         return true
@@ -369,6 +375,32 @@ function hasWorkflowCancelMeta(msg: Message, nodeId: string): boolean {
   return nodeId === 'room' && Boolean(meta.room_cancel_confirm)
 }
 
+function meetingConfirmMatchesNode(
+  msg: Message,
+  nodeId: string,
+  options?: { includeConfirmed?: boolean },
+): boolean {
+  const meeting = msg.metadata?.meeting_plan_confirm as {
+    status?: string
+    confirm_node_id?: string
+    needs_gn_meeting?: boolean
+    needs_room_booking?: boolean
+    plan_mode?: string
+  } | undefined
+  if (!meeting) return false
+  if (!options?.includeConfirmed && meeting.status !== 'pending') return false
+  if (meeting.confirm_node_id) {
+    return meeting.confirm_node_id === nodeId
+  }
+  if (nodeId === 'gn_meeting') {
+    return meeting.plan_mode === 'gn_only' || Boolean(meeting.needs_gn_meeting)
+  }
+  if (nodeId === 'room') {
+    return meeting.plan_mode === 'room_only' || Boolean(meeting.needs_room_booking)
+  }
+  return false
+}
+
 /** 消息是否包含该节点可编辑的待确认面板。 */
 export function messageHasPendingInteractivePanel(
   msg: Message,
@@ -387,7 +419,7 @@ export function messageHasPendingInteractivePanel(
       ) || isPendingWorkflowCancelForNode(msg, nodeId)
     case 'room':
       return isPendingWorkflowCancelForNode(msg, nodeId)
-        || (meta.meeting_plan_confirm as { status?: string } | undefined)?.status === 'pending'
+        || meetingConfirmMatchesNode(msg, 'room')
         || (meta.room_selection as { status?: string } | undefined)?.status === 'pending'
         || (
           (meta.meeting_cancel_selection as { status?: string } | undefined)?.status === 'pending'
@@ -408,11 +440,78 @@ export function messageHasPendingInteractivePanel(
       return (meta.info_collect_plan_confirm as { status?: string } | undefined)?.status === 'pending'
         || isPendingWorkflowCancelForNode(msg, nodeId)
     case 'gn_meeting':
-      return (meta.meeting_plan_confirm as { status?: string } | undefined)?.status === 'pending'
+      return meetingConfirmMatchesNode(msg, 'gn_meeting')
         || isPendingWorkflowCancelForNode(msg, nodeId)
         || (
           (meta.meeting_cancel_selection as { status?: string } | undefined)?.status === 'pending'
         )
+    default:
+      return false
+  }
+}
+
+export function messageHasOaWaitingForNode(
+  msg: Message,
+  nodeId: string,
+  taskId?: string | null,
+): boolean {
+  const meta = msg.metadata ?? {}
+  const completed = meta.workflow_completed_node as { node_id?: string; task_id?: string } | undefined
+  if (completed?.node_id === nodeId) return true
+  if (taskId && taskIdInMessage(msg, taskId) && !messageHasCompletedResultForNode(msg, nodeId)) {
+    return msg.message_type === 'task' || Boolean(meta.task_id)
+  }
+  return false
+}
+
+export function messageHasCompletedResultForNode(msg: Message, nodeId: string): boolean {
+  const meta = msg.metadata ?? {}
+  switch (nodeId) {
+    case 'gn_meeting':
+      return Boolean(meta.gn_meeting_result && (meta.oa_completion || (meta.gn_meeting_result as { meeting_link?: string }).meeting_link))
+    case 'room':
+      return Boolean(meta.room_booking_result)
+    case 'leave':
+      return Boolean(meta.leave_result)
+    case 'workpackage':
+      return Boolean(meta.workpackage_result)
+    case 'travel':
+      return Boolean(meta.travel_apply_result)
+    case 'booking':
+      return Boolean(meta.transport_booking_result)
+    case 'hotel':
+      return Boolean(meta.hotel_booking_result)
+    case 'email':
+      return Boolean(meta.email_sent_result)
+    default:
+      return false
+  }
+}
+
+export function messageHasConfirmedPlanForNode(msg: Message, nodeId: string): boolean {
+  const meta = msg.metadata ?? {}
+  switch (nodeId) {
+    case 'gn_meeting':
+    case 'room':
+      return meetingConfirmMatchesNode(msg, nodeId, { includeConfirmed: true })
+        && (meta.meeting_plan_confirm as { status?: string } | undefined)?.status === 'confirmed'
+    case 'leave':
+      return (meta.leave_plan_confirm as { status?: string } | undefined)?.status === 'confirmed'
+    case 'travel':
+      return travelPlanMeta(msg)?.status === 'confirmed'
+    case 'email':
+      return Boolean(
+        (meta.travel_plan_confirm as { email_only?: boolean; status?: string } | undefined)?.email_only
+        && (meta.travel_plan_confirm as { status?: string }).status === 'confirmed',
+      )
+    case 'workpackage':
+      return (meta.workpackage_plan_confirm as { status?: string } | undefined)?.status === 'confirmed'
+        || (meta.workpackage_confirm as { status?: string } | undefined)?.status === 'confirmed'
+    case 'info_collect':
+      return (meta.info_collect_plan_confirm as { status?: string } | undefined)?.status === 'confirmed'
+    case 'booking':
+    case 'hotel':
+      return (meta.booking_selection as { status?: string } | undefined)?.status === 'confirmed'
     default:
       return false
   }
@@ -426,6 +525,28 @@ export function findLatestMessageForNode(
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const msg = messages[index]
     if (messageHasPendingInteractivePanel(msg, node.id)) {
+      return msg
+    }
+  }
+  if (node.status === 'completed') {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const msg = messages[index]
+      if (messageHasCompletedResultForNode(msg, node.id)) {
+        return msg
+      }
+    }
+  }
+  if (node.status === 'submitted' || node.status === 'running' || node.status === 'completed') {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const msg = messages[index]
+      if (messageHasOaWaitingForNode(msg, node.id, node.task_id)) {
+        return msg
+      }
+    }
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const msg = messages[index]
+    if (messageHasConfirmedPlanForNode(msg, node.id)) {
       return msg
     }
   }
