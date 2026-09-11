@@ -302,7 +302,9 @@ function confirmDrawerRequest(msg: Message): WorkflowDrawerRequest | null {
   return null
 }
 
-function handleConfirmPanelFocus(msg: Message) {
+function handleConfirmPanelFocus(event: MouseEvent, msg: Message) {
+  const target = event.target as HTMLElement | null
+  if (target?.closest('button, .btn-confirm')) return
   const request = confirmDrawerRequest(msg)
   if (request) emit('openDrawer', request)
 }
@@ -719,7 +721,7 @@ function handleSwitchToFlightBooking() {
         <div
           v-if="travelPlanConfirm(msg) || emailPlanConfirm(msg)"
           class="node-drawer-trigger"
-          @mousedown="handleConfirmPanelFocus(msg)"
+          @mousedown="handleConfirmPanelFocus($event, msg)"
         >
         <TravelPlanConfirmPanel
           v-if="travelPlanConfirm(msg)"
@@ -755,7 +757,7 @@ function handleSwitchToFlightBooking() {
         <div
           v-if="hasInteractivePicker(msg) && !travelPlanConfirm(msg) && !emailPlanConfirm(msg)"
           class="interactive-zone"
-          @mousedown="handleConfirmPanelFocus(msg)"
+          @mousedown="handleConfirmPanelFocus($event, msg)"
         >
         <TravelBookingPicker
           v-if="bookingSelection(msg)"

@@ -84,6 +84,7 @@ function handleConfirm() {
         type="button"
         class="btn-confirm"
         :disabled="!selectedRoom || submitting"
+        @mousedown.stop
         @click="handleConfirm"
       >
         {{ submitting ? '提交中…' : '确认预约' }}

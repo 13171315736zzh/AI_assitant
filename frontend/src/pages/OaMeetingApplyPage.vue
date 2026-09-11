@@ -47,7 +47,20 @@ const toastMessage = ref<string | null>(null)
 const taskId = computed(() => String(route.params.taskId ?? ''))
 const labels = formFieldLabels.meeting
 
-const isGnMeeting = computed(() => (task.value ? isGnMeetingTask(task.value) : false))
+const meetingKindFromRoute = computed(() => {
+  if (route.name === 'oa-gn-meeting-apply') return 'gn' as const
+  if (route.name === 'oa-room-meeting-apply') return 'room' as const
+  const path = String(route.path)
+  if (path.includes('/oa/gn-meeting/')) return 'gn' as const
+  if (path.includes('/oa/room-meeting/')) return 'room' as const
+  return null
+})
+
+const isGnMeeting = computed(() => {
+  if (meetingKindFromRoute.value === 'gn') return true
+  if (meetingKindFromRoute.value === 'room') return false
+  return task.value ? isGnMeetingTask(task.value) : false
+})
 
 const systemTitle = computed(() =>
   isGnMeeting.value ? '国能集团 · 国能会议系统' : '国能集团 · 智慧会议系统',
@@ -113,11 +126,20 @@ async function load() {
     }
     task.value = taskRes.data
     phase.value = detectOaPhase(taskRes.data)
-    roomSelection.value = isGnMeetingTask(taskRes.data)
+    const routeKind = meetingKindFromRoute.value
+    if (routeKind === 'room' && isGnMeetingTask(taskRes.data)) {
+      error.value = '当前链接对应的是国能会议任务，请从会议室划窗重新打开 OA。'
+      return
+    }
+    if (routeKind === 'gn' && !isGnMeetingTask(taskRes.data)) {
+      error.value = '当前链接对应的不是国能会议任务，请从国能会议划窗重新打开 OA。'
+      return
+    }
+    roomSelection.value = isGnMeeting.value
       ? null
       : findRoomSelection(taskRes.data)
 
-    const formId = isGnMeetingTask(taskRes.data)
+    const formId = isGnMeeting.value
       ? findGnMeetingFormId(taskRes.data)
       : findMeetingFormId(taskRes.data)
     if (!formId) {

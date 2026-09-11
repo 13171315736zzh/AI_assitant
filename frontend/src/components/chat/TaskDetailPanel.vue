@@ -23,7 +23,7 @@ import {
   mergeLiveDrawerItems,
   OA_HANDLE_STATUS_LABEL,
 } from '@/utils/taskOaStatus'
-import { extractWorkflowPlan } from '@/utils/workflowPlan'
+import { extractWorkflowPlan, resolveOaTaskIdForNode } from '@/utils/workflowPlan'
 import GnMeetingResultPanel from '@/components/chat/GnMeetingResultPanel.vue'
 import RoomBookingResultPanel from '@/components/chat/RoomBookingResultPanel.vue'
 
@@ -31,6 +31,7 @@ const props = defineProps<{
   taskId?: string | null
   nodeId?: string | null
   pending?: WorkflowDrawerRequest | null
+  minimized?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -38,7 +39,8 @@ const emit = defineEmits<{
   openForm: [formId: string]
   cancelRequested: [messageId: string]
   confirmPending: []
-  bindTask: [taskId: string]
+  bindTask: [taskId: string, nodeId?: string | null]
+  minimize: []
 }>()
 
 const chat = useChatStore()
@@ -90,6 +92,8 @@ const visibleProgress = computed(() => {
 })
 
 const panelTitle = computed(() => {
+  if (currentNodeId.value === 'room') return '会议室预约任务详情'
+  if (currentNodeId.value === 'gn_meeting') return '国能会议任务详情'
   if (task.value) {
     if (isGnMeetingTask(task.value)) return '国能会议任务详情'
     if (isRoomBookingTask(task.value)) return '会议室预约任务详情'
@@ -183,9 +187,12 @@ const displayItems = computed(() => {
 })
 
 const linkedTaskId = computed(() => {
+  const nodeId = currentNodeId.value
+  const resolved = resolveOaTaskIdForNode(nodeId, messages.value, props.taskId)
+  if (nodeId === 'room' || nodeId === 'gn_meeting') return resolved
   if (props.taskId) return props.taskId
   const plan = extractWorkflowPlan(messages.value)
-  return plan?.nodes.find((item) => item.id === currentNodeId.value)?.task_id ?? null
+  return plan?.nodes.find((item) => item.id === nodeId)?.task_id ?? null
 })
 
 const canJumpOa = computed(() => {
@@ -203,7 +210,7 @@ const showOaButton = computed(() => {
   return canJumpOa.value || OA_JUMP_NODES.has(currentNodeId.value || '')
 })
 
-const oaSubmitting = computed(() => chat.workflowSubmitting)
+const oaJumping = ref(false)
 
 async function load() {
   if (!props.taskId) {
@@ -236,7 +243,7 @@ watch(
   linkedTaskId,
   (taskId) => {
     if (taskId && taskId !== props.taskId) {
-      emit('bindTask', taskId)
+      emit('bindTask', taskId, currentNodeId.value)
     }
   },
   { immediate: true },
@@ -248,10 +255,10 @@ useOaTaskSync((payload) => {
   }
 })
 
-function handleClose(event?: Event) {
+function handleMinimize(event?: Event) {
   event?.preventDefault()
   event?.stopPropagation()
-  emit('dismiss')
+  emit('minimize')
 }
 
 function stepIcon(status: TaskStep['status']) {
@@ -286,68 +293,91 @@ function oaFormLinkLabel(step: TaskStep): string {
 }
 
 async function handleConfirm() {
-  const taskId = linkedTaskId.value || props.taskId
+  const nodeId = currentNodeId.value
+  const taskId = resolveOaTaskIdForNode(
+    nodeId,
+    messages.value,
+    linkedTaskId.value || props.taskId,
+  )
   if (!taskId) {
     emit('confirmPending')
     return
   }
-  if (task.value) {
-    try {
-      await confirmTask(taskId, task.value.current_step)
-    } catch {
-      // 仍跳转 OA，避免确认步骤已完成时按钮无响应
+  oaJumping.value = true
+  try {
+    if (task.value && props.taskId === taskId) {
+      try {
+        await confirmTask(taskId, task.value.current_step)
+      } catch {
+        // 仍跳转 OA，避免确认步骤已完成时按钮无响应
+      }
+      await load()
     }
-    await load()
-  }
-  const nodeId = currentNodeId.value
-  if (nodeId === 'room' || (task.value && isRoomBookingTask(task.value))) {
-    const opened = openOaRoomMeetingApply(taskId)
-    if (!opened) {
-      alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 会议室预约页。')
+    if (nodeId === 'room') {
+      const opened = openOaRoomMeetingApply(taskId)
+      if (!opened) {
+        alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 会议室预约页。')
+      }
+      return
     }
-    return
-  }
-  if (!task.value) return
-  if (isTravelTask(task.value)) {
-    const opened = openOaTravelApply(taskId)
-    if (!opened) {
-      alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 差旅申请页。')
+    if (nodeId === 'gn_meeting') {
+      const opened = openOaGnMeetingApply(taskId)
+      if (!opened) {
+        alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 国能会议页。')
+      }
+      return
     }
-    return
-  }
-  if (isTransportBookTask(task.value)) {
-    const opened = openOaTransportBook(taskId)
-    if (!opened) {
-      alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 交通预订页。')
+    if (task.value && isRoomBookingTask(task.value)) {
+      const opened = openOaRoomMeetingApply(taskId)
+      if (!opened) {
+        alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 会议室预约页。')
+      }
+      return
     }
-    return
-  }
-  if (isHotelBookTask(task.value)) {
-    const opened = openOaHotelBook(taskId)
-    if (!opened) {
-      alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 酒店预订页。')
+    if (task.value && isGnMeetingTask(task.value)) {
+      const opened = openOaGnMeetingApply(taskId)
+      if (!opened) {
+        alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 国能会议页。')
+      }
+      return
     }
-    return
-  }
-  if (isWorkpackageTask(task.value)) {
-    const opened = openOaWorkpackageApply(taskId)
-    if (!opened) {
-      alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 工时填报页。')
+    if (!task.value) return
+    if (isTravelTask(task.value)) {
+      const opened = openOaTravelApply(taskId)
+      if (!opened) {
+        alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 差旅申请页。')
+      }
+      return
     }
-    return
-  }
-  if (isLeaveTask(task.value)) {
-    const opened = openOaLeaveApply(taskId)
-    if (!opened) {
-      alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 请假申请页。')
+    if (isTransportBookTask(task.value)) {
+      const opened = openOaTransportBook(taskId)
+      if (!opened) {
+        alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 交通预订页。')
+      }
+      return
     }
-    return
-  }
-  if (nodeId === 'gn_meeting' || isGnMeetingTask(task.value)) {
-    const opened = openOaGnMeetingApply(taskId)
-    if (!opened) {
-      alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 国能会议页。')
+    if (isHotelBookTask(task.value)) {
+      const opened = openOaHotelBook(taskId)
+      if (!opened) {
+        alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 酒店预订页。')
+      }
+      return
     }
+    if (isWorkpackageTask(task.value)) {
+      const opened = openOaWorkpackageApply(taskId)
+      if (!opened) {
+        alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 工时填报页。')
+      }
+      return
+    }
+    if (isLeaveTask(task.value)) {
+      const opened = openOaLeaveApply(taskId)
+      if (!opened) {
+        alert('无法打开新窗口，请检查浏览器是否拦截弹窗，或手动访问 OA 请假申请页。')
+      }
+    }
+  } finally {
+    oaJumping.value = false
   }
 }
 
@@ -359,15 +389,16 @@ function openFormFromStep(step: TaskStep) {
 
 <template>
   <Teleport to="body">
-  <aside class="task-panel" @click.stop>
+  <aside v-show="!minimized" class="task-panel" @click.stop>
     <header class="panel-header">
       <h2>{{ panelTitle }}</h2>
       <button
         type="button"
         class="btn-close"
-        aria-label="关闭"
+        aria-label="收起划窗"
+        title="收起划窗"
         @mousedown.stop
-        @click.stop.prevent="handleClose"
+        @click.stop.prevent="handleMinimize"
       >
         ×
       </button>
@@ -467,9 +498,9 @@ function openFormFromStep(step: TaskStep) {
         <button
           type="button"
           class="btn-secondary"
-          @click.stop.prevent="handleClose"
+          @click.stop.prevent="handleMinimize"
         >
-          关闭
+          收起
         </button>
         <button
           v-if="task.status !== 'completed' && task.status !== 'cancelled'"
@@ -483,7 +514,7 @@ function openFormFromStep(step: TaskStep) {
           v-if="showOaButton"
           type="button"
           class="btn-primary"
-          :disabled="oaSubmitting"
+          :disabled="oaJumping"
           title="前往 OA 提交"
           @click="handleConfirm"
         >
@@ -492,7 +523,7 @@ function openFormFromStep(step: TaskStep) {
       </footer>
     </template>
 
-    <template v-else-if="pending">
+    <template v-else-if="pending || linkedTaskId">
       <div class="panel-body">
         <div class="status-row">
           <span class="status-badge unsubmitted">未提交</span>
@@ -514,15 +545,15 @@ function openFormFromStep(step: TaskStep) {
         <button
           type="button"
           class="btn-secondary"
-          @click.stop.prevent="handleClose"
+          @click.stop.prevent="handleMinimize"
         >
-          关闭
+          收起
         </button>
         <button
           v-if="showOaButton"
           type="button"
           class="btn-primary"
-          :disabled="oaSubmitting"
+          :disabled="oaJumping"
           title="前往 OA 提交"
           @click="handleConfirm"
         >
@@ -534,9 +565,9 @@ function openFormFromStep(step: TaskStep) {
       <button
         type="button"
         class="btn-secondary"
-        @click.stop.prevent="handleClose"
+        @click.stop.prevent="handleMinimize"
       >
-        关闭
+        收起
       </button>
     </footer>
   </aside>

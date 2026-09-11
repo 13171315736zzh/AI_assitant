@@ -19,6 +19,7 @@ import {
   findLatestMessageForNode,
   messageHasPendingInteractivePanel,
   openOaPageForNode,
+  resolveOaTaskIdForNode,
   workflowPlanVisible,
 } from '@/utils/workflowPlan'
 import { filterDrawerItems } from '@/utils/taskOaStatus'
@@ -33,6 +34,9 @@ const pendingDrawer = ref<WorkflowDrawerRequest | null>(null)
 const activeNodeId = ref<string | null>(null)
 const dismissedNodeIds = ref<Set<string>>(new Set())
 const drawerEpoch = ref(0)
+const drawerMinimized = ref(false)
+const pinnedNodeId = ref<string | null>(null)
+const pinDrawerUntil = ref(0)
 const activeFormId = ref<string | null>(null)
 const previewSource = ref<MessageSource | null>(null)
 const deleteTarget = ref<Session | null>(null)
@@ -44,12 +48,21 @@ const chatInputRef = ref<InstanceType<typeof ChatInput> | null>(null)
 
 const workflowPlan = computed(() => extractWorkflowPlan(chat.messages))
 const showWorkflowRail = computed(() => workflowPlanVisible(workflowPlan.value))
+const drawerRestoreTitle = computed(() => {
+  const nodeId = activeNodeId.value || pendingDrawer.value?.nodeId || ''
+  return NODE_DRAWER_TITLE[nodeId] || pendingDrawer.value?.title || '任务详情'
+})
 
 watch(
   () => chat.activeSessionId,
   () => {
     workflowRailExpanded.value = false
     userCollapsedRail.value = false
+    drawerMinimized.value = false
+    activeTaskId.value = null
+    pendingDrawer.value = null
+    activeNodeId.value = null
+    dismissedNodeIds.value = new Set()
   },
 )
 
@@ -63,6 +76,7 @@ watch(
     if (!userCollapsedRail.value) {
       workflowRailExpanded.value = true
     }
+    if (drawerMinimized.value) return
     const pendingNodeId = pendingDrawer.value?.nodeId
     if (!pendingNodeId || activeTaskId.value) return
     const node = plan?.nodes.find((item) => item.id === pendingNodeId)
@@ -79,8 +93,13 @@ function toggleWorkflowRail() {
 }
 
 function onGlobalKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && (activeTaskId.value || pendingDrawer.value || activeFormId.value)) {
+  if (e.key !== 'Escape') return
+  if (activeFormId.value) {
     closePanels()
+    return
+  }
+  if ((activeTaskId.value || pendingDrawer.value) && !drawerMinimized.value) {
+    minimizeDrawer()
   }
 }
 
@@ -182,6 +201,13 @@ async function openTask(taskId: string, nodeId?: string | null) {
   const resolvedNodeId = nodeId
     || workflowPlan.value?.nodes.find((item) => item.task_id === taskId)?.id
     || null
+  if (resolvedNodeId === 'room' || resolvedNodeId === 'gn_meeting') {
+    const matchedId = resolveOaTaskIdForNode(resolvedNodeId, chat.messages, taskId)
+    if (!matchedId) return
+    taskId = matchedId
+  }
+  if (isDrawerPinnedTo(resolvedNodeId)) return
+  drawerMinimized.value = false
   clearDismissedNode(resolvedNodeId)
   if (activeTaskId.value === taskId && !pendingDrawer.value && activeNodeId.value === resolvedNodeId) {
     return
@@ -193,6 +219,99 @@ async function openTask(taskId: string, nodeId?: string | null) {
   drawerEpoch.value += 1
 }
 
+function pinConfirmedNode(nodeId: string | null | undefined, taskId?: string | null) {
+  if (!nodeId) return
+  pinnedNodeId.value = nodeId
+  pinDrawerUntil.value = Date.now() + 2500
+  drawerMinimized.value = false
+  if (taskId) {
+    void openTask(taskId, nodeId)
+    return
+  }
+  if (activeNodeId.value === nodeId && pendingDrawer.value?.nodeId === nodeId && !activeTaskId.value) {
+    return
+  }
+  activeFormId.value = null
+  activeTaskId.value = null
+  activeNodeId.value = nodeId
+  pendingDrawer.value = {
+    nodeId,
+    title: NODE_DRAWER_TITLE[nodeId] || pendingDrawer.value?.title || '任务详情',
+    items: pendingDrawer.value?.nodeId === nodeId ? (pendingDrawer.value.items ?? []) : [],
+  }
+  drawerEpoch.value += 1
+}
+
+function taskIdForNode(nodeId: string | null | undefined) {
+  if (!nodeId) return null
+  const fromPlan = extractWorkflowPlan(chat.messages)?.nodes.find((item) => item.id === nodeId)?.task_id
+  if (fromPlan) return fromPlan
+  for (let index = chat.messages.length - 1; index >= 0; index -= 1) {
+    const meta = chat.messages[index].metadata ?? {}
+    const completed = meta.workflow_completed_node as { node_id?: string; task_id?: string } | undefined
+    if (completed?.node_id === nodeId && completed.task_id) return completed.task_id
+    if (meta.task_id && (
+      (nodeId === 'gn_meeting' && meta.meeting_kind === 'gn')
+      || (nodeId === 'room' && meta.meeting_kind === 'room')
+    )) {
+      return String(meta.task_id)
+    }
+  }
+  return null
+}
+
+function resolveMeetingConfirmNodeId(payload: { messageId: string; confirm_node_id?: string }) {
+  if (payload.confirm_node_id === 'room' || payload.confirm_node_id === 'gn_meeting') {
+    return payload.confirm_node_id
+  }
+  const meeting = chat.messages.find((item) => item.id === payload.messageId)
+    ?.metadata?.meeting_plan_confirm as { confirm_node_id?: string } | undefined
+  if (meeting?.confirm_node_id === 'room' || meeting?.confirm_node_id === 'gn_meeting') {
+    return meeting.confirm_node_id
+  }
+  return 'gn_meeting'
+}
+
+async function handleConfirmMeetingPlan(payload: {
+  messageId: string
+  supplementary_content?: string
+  subject?: string
+  meeting_name?: string
+  meeting_topic?: string
+  room?: string | null
+  room_flexible?: boolean
+  room_preference?: string
+  attendees?: string
+  date_hint?: string
+  start_hint?: string
+  end_hint?: string
+  confirm_node_id?: string
+}) {
+  const nodeId = resolveMeetingConfirmNodeId(payload)
+  pinnedNodeId.value = nodeId
+  pinDrawerUntil.value = Date.now() + 2500
+  await chat.confirmMeetingPlan(payload)
+  await nextTick()
+  pinConfirmedNode(nodeId, taskIdForNode(nodeId))
+}
+
+async function handleConfirmRoom(payload: { messageId: string; room: string }) {
+  pinnedNodeId.value = 'room'
+  pinDrawerUntil.value = Date.now() + 2500
+  await chat.confirmRoom(payload)
+  await nextTick()
+  pinConfirmedNode('room', taskIdForNode('room'))
+}
+
+function isDrawerPinnedTo(nodeId?: string | null) {
+  return Boolean(
+    pinnedNodeId.value
+    && Date.now() < pinDrawerUntil.value
+    && nodeId
+    && nodeId !== pinnedNodeId.value,
+  )
+}
+
 function openWorkflowDrawer(request: WorkflowDrawerRequest) {
   const node = request.nodeId
     ? workflowPlan.value?.nodes.find((item) => item.id === request.nodeId)
@@ -200,6 +319,15 @@ function openWorkflowDrawer(request: WorkflowDrawerRequest) {
   const taskId = request.taskId || node?.task_id || null
   if (request.force) {
     clearDismissedNode(request.nodeId || node?.id)
+    pinnedNodeId.value = null
+    pinDrawerUntil.value = 0
+    drawerMinimized.value = false
+  } else if (isDrawerPinnedTo(request.nodeId)) {
+    return
+  } else if (drawerMinimized.value) {
+    const currentNode = activeNodeId.value || pendingDrawer.value?.nodeId
+    if (!request.nodeId || request.nodeId === currentNode) return
+    drawerMinimized.value = false
   } else if (!taskId && request.nodeId && dismissedNodeIds.value.has(request.nodeId)) {
     return
   }
@@ -239,8 +367,25 @@ function openForm(formId: string) {
   activeFormId.value = formId
 }
 
+function minimizeDrawer() {
+  if (!activeTaskId.value && !pendingDrawer.value) return
+  rememberDismissedNode(activeNodeId.value || pendingDrawer.value?.nodeId)
+  drawerMinimized.value = true
+}
+
+function restoreDrawer() {
+  drawerMinimized.value = false
+  clearDismissedNode(activeNodeId.value || pendingDrawer.value?.nodeId)
+}
+
+function onBindTask(taskId: string, nodeId?: string | null) {
+  if (drawerMinimized.value && taskId === activeTaskId.value) return
+  void openTask(taskId, nodeId || activeNodeId.value || pendingDrawer.value?.nodeId)
+}
+
 function closePanels() {
   rememberDismissedNode(activeNodeId.value || pendingDrawer.value?.nodeId)
+  drawerMinimized.value = false
   activeTaskId.value = null
   pendingDrawer.value = null
   activeNodeId.value = null
@@ -253,9 +398,10 @@ async function confirmPendingFromDrawer() {
   if (!nodeId) return
 
   const planNode = workflowPlan.value?.nodes.find((item) => item.id === nodeId)
-  if (planNode?.task_id) {
-    await openTask(planNode.task_id, nodeId)
-    if (!openOaPageForNode(planNode, planNode.task_id)) {
+  const jumpTaskId = resolveOaTaskIdForNode(nodeId, chat.messages, planNode?.task_id)
+  if (jumpTaskId) {
+    await openTask(jumpTaskId, nodeId)
+    if (!openOaPageForNode(planNode ?? { id: nodeId, label: nodeId, status: 'running' }, jumpTaskId)) {
       alert('无法打开新窗口，请检查浏览器是否拦截弹窗。')
     }
     return
@@ -277,6 +423,8 @@ async function confirmPendingFromDrawer() {
   }
 
   if (nodeId === 'gn_meeting' || nodeId === 'room') {
+    pinnedNodeId.value = nodeId
+    pinDrawerUntil.value = Date.now() + 2500
     const draft = chat.getWorkflowCardDraft(target.id, 'meeting_plan_confirm') ?? {}
     await chat.confirmMeetingPlan({
       messageId: target.id,
@@ -315,10 +463,11 @@ async function confirmPendingFromDrawer() {
   }
 
   await nextTick()
-  const nextNode = extractWorkflowPlan(chat.messages)?.nodes.find((item) => item.id === nodeId)
-  if (nextNode?.task_id) {
-    await openTask(nextNode.task_id, nodeId)
-    if (!openOaPageForNode(nextNode, nextNode.task_id)) {
+  const confirmedTaskId = resolveOaTaskIdForNode(nodeId, chat.messages)
+  pinConfirmedNode(nodeId, confirmedTaskId)
+  if (confirmedTaskId) {
+    const nextNode = extractWorkflowPlan(chat.messages)?.nodes.find((item) => item.id === nodeId)
+    if (!openOaPageForNode(nextNode ?? { id: nodeId, label: nodeId, status: 'running' }, confirmedTaskId)) {
       alert('无法打开新窗口，请检查浏览器是否拦截弹窗。')
     }
     return
@@ -333,8 +482,10 @@ function openSource(source: MessageSource) {
 }
 
 async function focusWorkflowNode(node: WorkflowPlanNode) {
+  pinnedNodeId.value = null
+  pinDrawerUntil.value = 0
   if (node.task_id) {
-    await openTask(node.task_id)
+    await openTask(node.task_id, node.id)
   } else {
     const target = findLatestMessageForNode(chat.displayMessages, node)
     const items = (target?.metadata?.meeting_plan_confirm
@@ -421,11 +572,11 @@ async function focusWorkflowNode(node: WorkflowPlanNode) {
         @open-drawer="openWorkflowDrawer"
         @open-source="openSource"
         @confirm-booking="chat.confirmBooking"
-        @confirm-room="chat.confirmRoom"
+        @confirm-room="handleConfirmRoom"
         @confirm-workpackage="chat.confirmWorkpackage"
         @confirm-workpackage-plan="chat.confirmWorkpackagePlan"
         @confirm-travel-plan="chat.confirmTravelPlan"
-        @confirm-meeting-plan="chat.confirmMeetingPlan"
+        @confirm-meeting-plan="handleConfirmMeetingPlan"
         @confirm-leave-plan="chat.confirmLeavePlan"
         @confirm-info-collect-plan="chat.confirmInfoCollectPlan"
         @confirm-workflow-cancel="chat.confirmWorkflowCancel"
@@ -449,14 +600,25 @@ async function focusWorkflowNode(node: WorkflowPlanNode) {
       :task-id="activeTaskId"
       :node-id="activeNodeId || pendingDrawer?.nodeId"
       :pending="pendingDrawer"
+      :minimized="drawerMinimized"
+      @minimize="minimizeDrawer"
       @dismiss="closePanels"
       @open-form="openForm"
       @confirm-pending="confirmPendingFromDrawer"
-      @bind-task="(taskId) => openTask(taskId, activeNodeId || pendingDrawer?.nodeId)"
+      @bind-task="onBindTask"
       @cancel-requested="(messageId) => messageListRef?.scrollToMessage(messageId, 'smooth', { highlightInteractive: true })"
     />
+    <button
+      v-if="drawerMinimized && (activeTaskId || pendingDrawer)"
+      type="button"
+      class="drawer-restore"
+      :title="`展开「${drawerRestoreTitle}」`"
+      @click="restoreDrawer"
+    >
+      <span class="drawer-restore-label">{{ drawerRestoreTitle }}</span>
+    </button>
     <div
-      v-if="activeTaskId || pendingDrawer"
+      v-if="(activeTaskId || pendingDrawer) && !drawerMinimized"
       class="drawer-spacer"
       aria-hidden="true"
     />
@@ -509,5 +671,38 @@ async function focusWorkflowNode(node: WorkflowPlanNode) {
 .drawer-spacer {
   width: min(480px, 100%);
   flex-shrink: 0;
+}
+
+.drawer-restore {
+  position: fixed;
+  top: 50%;
+  right: 0;
+  z-index: 2000;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  min-height: 132px;
+  padding: 16px 8px;
+  border: 1px solid var(--border);
+  border-right: none;
+  border-radius: 12px 0 0 12px;
+  background: var(--surface);
+  box-shadow: -6px 0 16px rgba(15, 23, 42, 0.1);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.drawer-restore:hover {
+  background: color-mix(in srgb, var(--primary) 8%, var(--surface));
+}
+
+.drawer-restore-label {
+  writing-mode: vertical-rl;
+  letter-spacing: 0.08em;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
 }
 </style>

@@ -331,6 +331,7 @@ function nextPage() {
     <TaskDetailPanel
       v-if="activeTaskId"
       :task-id="activeTaskId"
+      @minimize="closePanels"
       @dismiss="closePanels"
       @open-form="openForm"
     />

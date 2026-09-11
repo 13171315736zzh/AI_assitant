@@ -193,6 +193,58 @@ export function nodeHasOaPage(nodeId: string): boolean {
   return OA_PAGE_NODE_IDS.has(nodeId)
 }
 
+function meetingTaskIdFromMessages(messages: Message[], kind: 'gn' | 'room'): string | null {
+  const nodeId = kind === 'gn' ? 'gn_meeting' : 'room'
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const meta = messages[index].metadata ?? {}
+    const completed = meta.workflow_completed_node as {
+      node_id?: string
+      task_id?: string
+      meeting_kind?: string
+    } | undefined
+    if (completed?.task_id && (completed.node_id === nodeId || completed.meeting_kind === kind)) {
+      return String(completed.task_id)
+    }
+    if (meta.meeting_kind === kind && meta.task_id) {
+      return String(meta.task_id)
+    }
+    const related = meta.related_tasks as Array<{ task_id?: string; meeting_kind?: string }> | undefined
+    const hit = related?.find((item) => item.meeting_kind === kind && item.task_id)
+    if (hit?.task_id) return String(hit.task_id)
+  }
+  return null
+}
+
+/** 按办理节点解析 OA 任务 ID，避免会议室划窗误用国能会 task_id。 */
+export function resolveOaTaskIdForNode(
+  nodeId: string | null | undefined,
+  messages: Message[],
+  fallbackTaskId?: string | null,
+): string | null {
+  if (!nodeId) return fallbackTaskId ?? null
+  const plan = extractWorkflowPlan(messages)
+  const nodeTaskId = plan?.nodes.find((item) => item.id === nodeId)?.task_id ?? null
+  const gnTaskId = plan?.nodes.find((item) => item.id === 'gn_meeting')?.task_id ?? null
+  const roomTaskId = plan?.nodes.find((item) => item.id === 'room')?.task_id ?? null
+
+  if (nodeId === 'room') {
+    const fromPlan = roomTaskId && roomTaskId !== gnTaskId ? roomTaskId : null
+    const fromMeta = meetingTaskIdFromMessages(messages, 'room')
+    const candidate = fromPlan || fromMeta
+    if (candidate && candidate !== gnTaskId) return candidate
+    if (fallbackTaskId && fallbackTaskId !== gnTaskId) return fallbackTaskId
+    return candidate
+  }
+  if (nodeId === 'gn_meeting') {
+    return gnTaskId
+      || meetingTaskIdFromMessages(messages, 'gn')
+      || fallbackTaskId
+      || nodeTaskId
+      || null
+  }
+  return nodeTaskId || fallbackTaskId || null
+}
+
 export function openOaPageForNode(node: WorkflowPlanNode, taskId: string): boolean {
   if (!taskId) return false
   switch (node.id) {

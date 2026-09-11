@@ -388,6 +388,7 @@ function handleConfirm() {
         type="button"
         class="btn-confirm"
         :disabled="submitting"
+        @mousedown.stop
         @click="handleConfirm"
       >
         {{ submitting ? '处理中…' : confirmLabel }}
